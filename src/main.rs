@@ -1,10 +1,11 @@
-use std::{fs, thread};
+use std::{cmp, fs, thread};
+use std::cmp::Ordering;
 use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use byteorder::{BigEndian, ReadBytesExt};
-use serde_bencode::de;
+use serde_bencode::{de, Error};
 use serde_derive::{Serialize, Deserialize};
 use serde_bytes::ByteBuf;
 use sha1::{Sha1};
@@ -84,7 +85,45 @@ fn create_handshake(info_hash: &[u8], peer_id: &[u8]) -> Vec<u8> {
     handshake.extend([0u8; 8]);
     handshake.extend(info_hash);
     handshake.extend(peer_id);
-    return handshake
+    return handshake;
+}
+
+struct Handshake {
+    protocol_id_length: usize,
+    protocol_id: String,
+    reserved_bytes: Vec<u8>,
+    info_hash: Vec<u8>,
+    peer_id: Vec<u8>,
+}
+
+fn parse_handshake(buf: Vec<u8>) -> Result<Handshake, Error> {
+    let protocol_id_length: usize = buf[0].into();
+    if protocol_id_length == 0 {
+        // TODO: throw an error here
+        return Err(Error::InvalidValue(String::from("Cannot be length 0")));
+    }
+    let protocol_id = String::from_utf8(buf[1..(protocol_id_length + 1)].to_vec()).unwrap();
+    let reserved_bytes = buf[protocol_id_length + 1..protocol_id_length + 9].to_vec();
+    let info_hash = buf[protocol_id_length + 9..protocol_id_length + 29].to_vec();
+    let peer_id = buf[protocol_id_length + 29..protocol_id_length + 49].to_vec();
+    return Ok(Handshake {
+        protocol_id_length,
+        protocol_id,
+        reserved_bytes,
+        info_hash,
+        peer_id,
+    });
+}
+
+fn compare_info_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        match ai.cmp(&bi) {
+            Ordering::Equal => continue,
+            ord => return ord
+        }
+    }
+
+    a.len().cmp(&b.len())
 }
 
 fn main() {
@@ -129,7 +168,13 @@ fn main() {
                         let mut read_buff = vec![0; 68];
                         match stream.read(&mut read_buff) {
                             Err(_) => println!("Could not read from socket"),
-                            Ok(_) => println!("Response from {:?}: {:?}", peer_addr, read_buff)
+                            Ok(_) => {
+                                if let Ok(received_handshake) = parse_handshake(read_buff) {
+                                    let peer_info_hash: [u8; 20] = received_handshake.info_hash.try_into().unwrap();
+                                    let info_hashes_equal = compare_info_hashes(&info_hash, &peer_info_hash).is_eq();
+                                    println!("{:?}", info_hashes_equal);
+                                }
+                            }
                         }
                     }
                 }
