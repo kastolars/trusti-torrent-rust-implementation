@@ -1,7 +1,9 @@
-use std::fs;
-use std::io::Cursor;
+use std::{fs, thread};
+use std::borrow::Borrow;
+use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::str::FromStr;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use byteorder::{BigEndian, ReadBytesExt};
 use serde_bencode::de;
@@ -48,7 +50,6 @@ impl Info {
         return hasher.digest().bytes();
     }
 }
-
 
 fn main() {
     // Parse the torrent file
@@ -123,9 +124,32 @@ fn main() {
     handshake.extend(info_hash);
     handshake.extend(peer_id);
 
-    println!("{:?}", handshake);
 
     // Make the handshake
-    let mut stream = TcpStream::connect_timeout(&sock_addrs[0], Duration::from_secs(3)).unwrap();
+    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    for &sock in &sock_addrs {
+        let handshake_copy = handshake.clone();
+        let handle = thread::spawn(move || {
+            match TcpStream::connect_timeout(&sock, Duration::from_secs(3)) {
+                Err(_) => println!("Could not connect to {:?}", sock.to_string()),
+                Ok(mut stream) => {
+                    stream.set_write_timeout(Some(Duration::from_secs(3)));
+                    if let Ok(_) = stream.write(&handshake_copy) {
+                        stream.set_read_timeout(Some(Duration::from_secs(3)));
+                        let mut read_buff = vec![0; 68];
+                        match stream.read(&mut read_buff) {
+                            Err(_) => println!("Could not read from socket"),
+                            Ok(_) => println!("{:?}", read_buff)
+                        }
+                    }
+                }
+            }
+        });
 
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap()
+    }
 }
