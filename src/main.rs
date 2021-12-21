@@ -5,11 +5,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use byteorder::{BigEndian, ReadBytesExt};
-use serde_bencode::{de, Error};
+use serde_bencode::{de};
 use serde_derive::{Serialize, Deserialize};
 use serde_bytes::ByteBuf;
 use sha1::{Sha1};
 use urlencoding::{encode_binary};
+use std::error::Error as StdError;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Info {
@@ -88,32 +89,6 @@ fn create_handshake(info_hash: &[u8], peer_id: &[u8]) -> Vec<u8> {
     return handshake;
 }
 
-struct Handshake {
-    protocol_id_length: usize,
-    protocol_id: String,
-    reserved_bytes: Vec<u8>,
-    info_hash: Vec<u8>,
-    peer_id: Vec<u8>,
-}
-
-fn parse_handshake(buf: Vec<u8>) -> Result<Handshake, Error> {
-    let protocol_id_length: usize = buf[0].into();
-    if protocol_id_length == 0 {
-        // TODO: throw an error here
-        return Err(Error::InvalidValue(String::from("Cannot be length 0")));
-    }
-    let protocol_id = String::from_utf8(buf[1..(protocol_id_length + 1)].to_vec()).unwrap();
-    let reserved_bytes = buf[protocol_id_length + 1..protocol_id_length + 9].to_vec();
-    let info_hash = buf[protocol_id_length + 9..protocol_id_length + 29].to_vec();
-    let peer_id = buf[protocol_id_length + 29..protocol_id_length + 49].to_vec();
-    return Ok(Handshake {
-        protocol_id_length,
-        protocol_id,
-        reserved_bytes,
-        info_hash,
-        peer_id,
-    });
-}
 
 fn compare_info_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
     for (ai, bi) in a.iter().zip(b.iter()) {
@@ -126,7 +101,87 @@ fn compare_info_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
     a.len().cmp(&b.len())
 }
 
-fn main() {
+const MSG_CHOKE: u8 = 0;
+const MSG_UNCHOKE: u8 = 1;
+const MSG_INTERESTED: u8 = 2;
+const MSG_NOT_INTERESTED: u8 = 3;
+const MSG_HAVE: u8 = 4;
+const MSG_BITFIELD: u8 = 5;
+const MSG_REQUEST: u8 = 6;
+const MSG_PIECE: u8 = 7;
+const MSG_CANCEL: u8 = 8;
+
+fn handle_peer(peer_addr: SocketAddr, handshake_copy: Vec<u8>, info_hash: &[u8]) -> anyhow::Result<()> {
+    // Connect to peer
+    println!("Attempting to connect to peer: {:?}...", peer_addr.to_string());
+    let mut stream = TcpStream::connect_timeout(&peer_addr, Duration::from_secs(3))?;
+    println!("Successfully connected to peer {:?}!", peer_addr.to_string());
+
+    // Send handshake
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    stream.write(&handshake_copy)?;
+
+    // Receive handshake
+    let mut pstrlen_buf = [0u8; 1];
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.read(&mut pstrlen_buf)?;
+
+    // Get PstrLen
+    let pstrlen = pstrlen_buf[0] as usize;
+    if pstrlen == 0 {
+        println!("Pstrlen cannot be 0");
+        // TODO: Make this return an error
+        return Ok(());
+    }
+
+    // Get info hash and peer id
+    let mut handshake_buf = vec![0u8; pstrlen + 8 + 20 + 20];
+    stream.read(&mut handshake_buf)?;
+    let peer_info_hash = &handshake_buf[pstrlen + 8..pstrlen + 8 + 20];
+    let _ = &handshake_buf[pstrlen + 8 + 20..];
+
+    // Compare info hashes
+    if !compare_info_hashes(&info_hash, &peer_info_hash).is_eq() {
+        println!("Incompatible info hashes");
+        // TODO: Make this return an error
+        return Ok(());
+    }
+
+    // Get potential bitfield message length
+    let mut message_length_buf = [0u8; 4];
+    stream.read(&mut message_length_buf)?;
+    let mut msg_length_cursor = Cursor::new(message_length_buf);
+    let message_length = msg_length_cursor.read_u32::<BigEndian>().unwrap() as usize;
+    if message_length == 0 {
+        println!("Was not expecting a keep alive message");
+        // TODO: Make this return an error
+        return Ok(());
+    }
+
+    // Get bitfield message
+    let mut bitfield_buf = vec![0u8; message_length];
+    stream.read(&mut bitfield_buf)?;
+    let message_id = bitfield_buf[0];
+    if !message_id == MSG_BITFIELD {
+        println!("Expected bitfield message, got {:?}", message_id);
+        // TODO: Make this return an error
+        return Ok(());
+    }
+    let _ = &bitfield_buf[1..];
+
+    // Send Unchoke
+    let unchoke_buf: [u8; 5] = [0, 0, 0, 1, MSG_UNCHOKE];
+    stream.write(&unchoke_buf)?;
+
+    // Send Interested
+    let interested_buf: [u8; 5] = [0, 0, 0, 1, MSG_INTERESTED];
+    stream.write(&interested_buf)?;
+
+
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn StdError>> {
     // Hardcoded local filepath
     let path = "C:\\Users\\kasto\\IdeaProjects\\trusti\\src\\debian-11.2.0-amd64-netinst.iso.torrent";
 
@@ -159,26 +214,7 @@ fn main() {
     for &peer_addr in &peers {
         let handshake_copy = handshake.clone();
         let handle = thread::spawn(move || {
-            match TcpStream::connect_timeout(&peer_addr, Duration::from_secs(3)) {
-                Err(_) => println!("Could not connect to {:?}", peer_addr.to_string()),
-                Ok(mut stream) => {
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-                    if let Ok(_) = stream.write(&handshake_copy) {
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-                        let mut read_buff = vec![0; 68];
-                        match stream.read(&mut read_buff) {
-                            Err(_) => println!("Could not read from socket"),
-                            Ok(_) => {
-                                if let Ok(received_handshake) = parse_handshake(read_buff) {
-                                    let peer_info_hash: [u8; 20] = received_handshake.info_hash.try_into().unwrap();
-                                    let info_hashes_equal = compare_info_hashes(&info_hash, &peer_info_hash).is_eq();
-                                    println!("{:?}", info_hashes_equal);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let _ = handle_peer(peer_addr, handshake_copy, &info_hash);
         });
 
         handles.push(handle);
@@ -187,4 +223,5 @@ fn main() {
     for handle in handles {
         handle.join().unwrap()
     }
+    Ok(())
 }
