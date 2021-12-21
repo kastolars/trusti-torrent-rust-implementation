@@ -12,6 +12,7 @@ use sha1::{Sha1};
 use urlencoding::{encode_binary};
 use std::error::Error as StdError;
 use crossbeam_channel as channel;
+use crossbeam_channel::Receiver;
 
 const MSG_CHOKE: u8 = 0;
 const MSG_UNCHOKE: u8 = 1;
@@ -118,7 +119,7 @@ fn compare_info_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
 }
 
 
-fn handle_peer(peer_addr: SocketAddr, handshake_copy: Vec<u8>, info_hash: &[u8]) -> anyhow::Result<()> {
+fn handle_peer(peer_addr: SocketAddr, handshake_copy: Vec<u8>, info_hash: &[u8], piece_work_receiver: Receiver<PieceWork>) -> anyhow::Result<()> {
     // Connect to peer
     println!("Attempting to connect to peer: {:?}...", peer_addr.to_string());
     let mut stream = TcpStream::connect_timeout(&peer_addr, Duration::from_secs(3))?;
@@ -174,7 +175,7 @@ fn handle_peer(peer_addr: SocketAddr, handshake_copy: Vec<u8>, info_hash: &[u8])
         // TODO: Make this return an error
         return Ok(());
     }
-    let _ = &bitfield_buf[1..];
+    let bitfield = &bitfield_buf[1..];
 
     // Send Unchoke
     let unchoke_buf: [u8; 5] = [0, 0, 0, 1, MSG_UNCHOKE];
@@ -184,11 +185,16 @@ fn handle_peer(peer_addr: SocketAddr, handshake_copy: Vec<u8>, info_hash: &[u8])
     let interested_buf: [u8; 5] = [0, 0, 0, 1, MSG_INTERESTED];
     stream.write(&interested_buf)?;
 
+    for piece_work in piece_work_receiver {
+        println!("{:?}", piece_work);
+        let byte
+    }
+
 
     Ok(())
 }
 
-
+#[derive(Debug)]
 struct PieceWork {
     index: usize,
     hash: Vec<u8>,
@@ -262,16 +268,15 @@ fn main() -> Result<(), Box<dyn StdError>> {
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
     for &peer_addr in &peers {
         let handshake_copy = handshake.clone();
+        let piece_work_receiver_copy = piece_work_receiver.clone();
         let handle = thread::spawn(move || {
-            let _ = handle_peer(peer_addr, handshake_copy, &info_hash);
+            let _ = handle_peer(peer_addr, handshake_copy, &info_hash, piece_work_receiver_copy);
         });
 
         handles.push(handle);
     }
 
-    for handle in handles {
-        handle.join().unwrap()
-    }
+    for handle in handles { handle.join().unwrap() }
     Ok(())
 }
 
