@@ -11,6 +11,17 @@ use serde_bytes::ByteBuf;
 use sha1::{Sha1};
 use urlencoding::{encode_binary};
 use std::error::Error as StdError;
+use crossbeam_channel as channel;
+
+const MSG_CHOKE: u8 = 0;
+const MSG_UNCHOKE: u8 = 1;
+const MSG_INTERESTED: u8 = 2;
+const MSG_NOT_INTERESTED: u8 = 3;
+const MSG_HAVE: u8 = 4;
+const MSG_BITFIELD: u8 = 5;
+const MSG_REQUEST: u8 = 6;
+const MSG_PIECE: u8 = 7;
+const MSG_CANCEL: u8 = 8;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Info {
@@ -43,6 +54,11 @@ impl Info {
         let mut hasher = Sha1::new();
         hasher.update(serialized_info.as_slice());
         return hasher.digest().bytes();
+    }
+
+    fn piece_hashes(&self) -> Vec<&[u8]> {
+        let pieces = self.pieces.as_ref();
+        return pieces.chunks(20).collect();
     }
 }
 
@@ -101,15 +117,6 @@ fn compare_info_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
     a.len().cmp(&b.len())
 }
 
-const MSG_CHOKE: u8 = 0;
-const MSG_UNCHOKE: u8 = 1;
-const MSG_INTERESTED: u8 = 2;
-const MSG_NOT_INTERESTED: u8 = 3;
-const MSG_HAVE: u8 = 4;
-const MSG_BITFIELD: u8 = 5;
-const MSG_REQUEST: u8 = 6;
-const MSG_PIECE: u8 = 7;
-const MSG_CANCEL: u8 = 8;
 
 fn handle_peer(peer_addr: SocketAddr, handshake_copy: Vec<u8>, info_hash: &[u8]) -> anyhow::Result<()> {
     // Connect to peer
@@ -181,12 +188,54 @@ fn handle_peer(peer_addr: SocketAddr, handshake_copy: Vec<u8>, info_hash: &[u8])
     Ok(())
 }
 
+
+struct PieceWork {
+    index: usize,
+    hash: Vec<u8>,
+    length: usize,
+}
+
+struct PieceResult {
+    index: usize,
+    buf: Vec<u8>,
+}
+
+fn calculate_bounds_for_piece(index: usize, piece_length: usize, length: usize) -> (usize, usize) {
+    let begin = index * piece_length;
+    let mut end = begin + piece_length;
+    if end > length {
+        end = length
+    }
+    return (begin, end);
+}
+
+fn calculate_piece_size(index: usize, piece_length: u64, length: u64) -> usize {
+    let (begin, end) = calculate_bounds_for_piece(index, piece_length as usize, length as usize);
+    return end - begin;
+}
+
+
 fn main() -> Result<(), Box<dyn StdError>> {
     // Hardcoded local filepath
     let path = "C:\\Users\\kasto\\IdeaProjects\\trusti\\src\\debian-11.2.0-amd64-netinst.iso.torrent";
 
     // Parse the torrent file
     let torrent = Torrent::from(path);
+
+    // Create the channels for maintaining work
+    let piece_hashes = torrent.info.piece_hashes();
+    let (piece_work_sender, piece_work_receiver): (crossbeam_channel::Sender<PieceWork>, crossbeam_channel::Receiver<PieceWork>) = channel::bounded(piece_hashes.len());
+    let (result_sender, result_receiver): (crossbeam_channel::Sender<PieceResult>, crossbeam_channel::Receiver<PieceResult>) = channel::unbounded();
+    for (index, &piece_hash) in piece_hashes.iter().enumerate() {
+        let length = calculate_piece_size(index, torrent.info.piece_length, torrent.info.length);
+        let piece_work = PieceWork {
+            index,
+            hash: piece_hash.to_vec(),
+            length,
+        };
+        piece_work_sender.send(piece_work);
+    }
+
 
     // Peer Id
     let peer_id: [u8; 20] = generate_peer_id().try_into().unwrap();
@@ -225,3 +274,4 @@ fn main() -> Result<(), Box<dyn StdError>> {
     }
     Ok(())
 }
+
