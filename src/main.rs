@@ -135,17 +135,12 @@ struct PieceResult {
     buf: Vec<u8>,
 }
 
-fn calculate_bounds_for_piece(index: usize, piece_length: usize, length: usize) -> (usize, usize) {
+fn calculate_piece_size(index: usize, piece_length: usize, length: usize) -> usize {
     let begin = index * piece_length;
     let mut end = begin + piece_length;
     if end > length {
         end = length
     }
-    return (begin, end);
-}
-
-fn calculate_piece_size(index: usize, piece_length: u64, length: u64) -> usize {
-    let (begin, end) = calculate_bounds_for_piece(index, piece_length as usize, length as usize);
     return end - begin;
 }
 
@@ -191,9 +186,11 @@ fn main() -> anyhow::Result<()> {
     let (piece_request_sender, piece_request_receiver): (Sender<PieceRequest>, Receiver<PieceRequest>) = crossbeam_channel::bounded(piece_hashes.len());
     for (index, &piece_hash) in piece_hashes.iter().enumerate() {
         let vec = piece_hash.to_vec();
+        let length = calculate_piece_size(index, torrent.info.piece_length as usize, torrent.info.length as usize);
         let piece_req = PieceRequest {
             index,
             piece_hash: vec,
+            length,
         };
         piece_request_sender.send(piece_req)?;
     }
@@ -219,6 +216,7 @@ fn main() -> anyhow::Result<()> {
 struct PieceRequest {
     piece_hash: Vec<u8>,
     index: usize,
+    length: usize,
 }
 
 fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> anyhow::Result<Connection> {
@@ -276,6 +274,7 @@ fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> 
 }
 
 const MAX_BLOCK_SIZE: u16 = 16384;
+const MAX_PIPELINED_REQUESTS: u8 = 5;
 
 
 fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_request_receiver: Receiver<PieceRequest>, piece_request_sender: Sender<PieceRequest>) -> anyhow::Result<()> {
@@ -300,8 +299,38 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
         println!("Peer {:?} has piece index {:?}", conn.peer_id, piece_request.index);
 
         // Otherwise download it
+        let mut num_bytes_downloaded = 0usize;
+        let mut num_bytes_requested = 0usize;
+        let mut num_pipelined_requests = 0u8;
+        while num_bytes_downloaded < piece_request.length {
+            // If we are not choked, send requests
+            if !conn.choked {
+                // Pipeline requests
+                while num_pipelined_requests < MAX_PIPELINED_REQUESTS && num_bytes_requested < piece_request.length {
+                    let mut block_size = MAX_BLOCK_SIZE;
+                    if piece_request.length - num_bytes_requested < block_size as usize {
+                        block_size = (piece_request.length - num_bytes_requested) as u16
+                    }
 
-        // Check integrity
+                    // Send Request here
+
+                    num_pipelined_requests += 1;
+                    num_bytes_requested += block_size;
+                }
+            }
+
+            // Receive messages
+            let msg = read_message(&conn.stream)?;
+            match msg.id {
+                MessageId::UnChoke => { conn.choked = false; }
+                MessageId::Choke => { conn.choked = true; }
+                _ => {}
+            }
+        }
+
+        // If the download fails, put it back on the work queue
+
+        // Check integrity - put it back on the work queue if it's incorrect
 
         // Send Have message
 
@@ -309,15 +338,6 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
     }
 
     Ok(())
-
-
-    //     let msg = read_message(&conn.stream)?;
-    //     println!("{:?} sent message: {:?}", conn.peer_id, msg.id);
-    //     match msg.id {
-    //         MessageId::UnChoke => { conn.choked = false; }
-    //         MessageId::Choke => { conn.choked = true; }
-    //         _ => {}
-    //     }
 }
 
 fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
