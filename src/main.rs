@@ -4,7 +4,7 @@ use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde_bencode::{de};
 use serde_derive::{Serialize, Deserialize};
 use serde_bytes::ByteBuf;
@@ -13,11 +13,12 @@ use urlencoding::{encode_binary};
 use anyhow::{ensure};
 use crossbeam_channel::{Receiver, Sender};
 use num_enum::TryFromPrimitive;
+use num_enum::IntoPrimitive;
 use std::convert::TryFrom;
 
 const MSG_INTERESTED: u8 = 2;
 
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 enum MessageId {
     Choke,
@@ -288,7 +289,6 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
     // Loop over pieces
     for piece_request in piece_request_receiver {
         // Check if peer has piece
-        println!("Checking if peer {:?} has piece index {:?}", conn.peer_id, piece_request.index);
         let has_piece = bitfield_contains_index(&conn.bitfield, piece_request.index as isize);
 
         // If they don't put it back in the queue
@@ -296,7 +296,6 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
             piece_request_sender.send(piece_request)?;
             continue;
         }
-        println!("Peer {:?} has piece index {:?}", conn.peer_id, piece_request.index);
 
         // Otherwise download it
         let mut num_bytes_downloaded = 0usize;
@@ -312,10 +311,18 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
                         block_size = (piece_request.length - num_bytes_requested) as u16
                     }
 
-                    // Send Request here
+                    // TODO: Send Request here
+                    let mut crsr = Cursor::new(vec![]);
+                    crsr.write_u32::<BigEndian>(1 + 4 * 3);
+                    crsr.write_u8(MessageId::Request.into());
+                    crsr.write_u32::<BigEndian>(piece_request.index as u32);
+                    crsr.write_u32::<BigEndian>(num_bytes_requested as u32);
+                    crsr.write_u32::<BigEndian>(block_size as u32);
+                    let mut payload = crsr.get_mut();
+                    conn.stream.write(payload);
 
                     num_pipelined_requests += 1;
-                    num_bytes_requested += block_size;
+                    num_bytes_requested += block_size as usize;
                 }
             }
 
@@ -324,6 +331,7 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
             match msg.id {
                 MessageId::UnChoke => { conn.choked = false; }
                 MessageId::Choke => { conn.choked = true; }
+                MessageId::Piece => { println!("Received piece message from {:?}", conn.peer_id) }
                 _ => {}
             }
         }
