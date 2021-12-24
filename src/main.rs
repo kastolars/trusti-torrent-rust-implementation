@@ -11,9 +11,9 @@ use serde_bytes::ByteBuf;
 use sha1::{Sha1};
 use urlencoding::{encode_binary};
 use std::error::Error as StdError;
-use anyhow::{bail, ensure};
+use anyhow::{anyhow, ensure};
 use crossbeam_channel as channel;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
 
@@ -63,16 +63,13 @@ struct Tracker {
     peers: ByteBuf,
 }
 
-fn generate_peer_id() -> Vec<u8> {
-    return (0..20).map(|_| { rand::random::<u8>() }).collect();
-}
 
 impl Info {
-    fn hash(&self) -> [u8; 20] {
-        let serialized_info = serde_bencode::to_bytes(&self).unwrap();
+    fn hash(&self) -> anyhow::Result<[u8; 20]> {
+        let serialized_info = serde_bencode::to_bytes(&self)?;
         let mut hasher = Sha1::new();
         hasher.update(serialized_info.as_slice());
-        return hasher.digest().bytes();
+        Ok(hasher.digest().bytes())
     }
 
     fn piece_hashes(&self) -> Vec<&[u8]> {
@@ -137,79 +134,6 @@ fn compare_info_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
 }
 
 
-fn handle_peer(peer_addr: SocketAddr, handshake_copy: Vec<u8>, info_hash: &[u8], piece_work_receiver: Receiver<PieceWork>) -> anyhow::Result<()> {
-    // Connect to peer
-    println!("Attempting to connect to peer: {:?}...", peer_addr.to_string());
-    let mut stream = TcpStream::connect_timeout(&peer_addr, Duration::from_secs(3))?;
-    println!("Successfully connected to peer {:?}!", peer_addr.to_string());
-
-    // Send handshake
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    stream.write(&handshake_copy)?;
-
-    // Receive handshake
-    let mut pstrlen_buf = [0u8; 1];
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    stream.read(&mut pstrlen_buf)?;
-
-    // Get PstrLen
-    let pstrlen = pstrlen_buf[0] as usize;
-    if pstrlen == 0 {
-        println!("Pstrlen cannot be 0");
-        // TODO: Make this return an error
-        return Ok(());
-    }
-
-    // Get info hash and peer id
-    let mut handshake_buf = vec![0u8; pstrlen + 8 + 20 + 20];
-    stream.read(&mut handshake_buf)?;
-    let peer_info_hash = &handshake_buf[pstrlen + 8..pstrlen + 8 + 20];
-    let _ = &handshake_buf[pstrlen + 8 + 20..];
-
-    // Compare info hashes
-    if !compare_info_hashes(&info_hash, &peer_info_hash).is_eq() {
-        println!("Incompatible info hashes");
-        // TODO: Make this return an error
-        return Ok(());
-    }
-
-    // Get potential bitfield message length
-    let mut message_length_buf = [0u8; 4];
-    stream.read(&mut message_length_buf)?;
-    let mut msg_length_cursor = Cursor::new(message_length_buf);
-    let message_length = msg_length_cursor.read_u32::<BigEndian>().unwrap() as usize;
-    if message_length == 0 {
-        println!("Was not expecting a keep alive message");
-        // TODO: Make this return an error
-        return Ok(());
-    }
-
-    // Get bitfield message
-    let mut bitfield_buf = vec![0u8; message_length];
-    stream.read(&mut bitfield_buf)?;
-    let message_id = bitfield_buf[0];
-    if !message_id == MSG_BITFIELD {
-        println!("Expected bitfield message, got {:?}", message_id);
-        // TODO: Make this return an error
-        return Ok(());
-    }
-    let bitfield = &bitfield_buf[1..];
-
-    // Send Unchoke
-    let unchoke_buf: [u8; 5] = [0, 0, 0, 1, MSG_UNCHOKE];
-    stream.write(&unchoke_buf)?;
-
-    // Send Interested
-    let interested_buf: [u8; 5] = [0, 0, 0, 1, MSG_INTERESTED];
-    stream.write(&interested_buf)?;
-
-    for piece_work in piece_work_receiver {
-        println!("{:?}", piece_work);
-    }
-
-    Ok(())
-}
-
 #[derive(Debug)]
 struct PieceWork {
     index: usize,
@@ -261,114 +185,6 @@ fn original() -> Result<(), Box<dyn StdError>> {
         piece_work_collection.push(piece_work);
     }
 
-
-    // Peer Id
-    let peer_id: [u8; 20] = generate_peer_id().try_into().unwrap();
-
-    // Info hash
-    let info_hash = torrent.info.hash();
-
-    // Build the url
-    let url = build_tracker_url(torrent, &info_hash, &peer_id);
-
-    // Get tracker
-    let resp = reqwest::blocking::get(url).unwrap().bytes().unwrap();
-    let tracker = de::from_bytes::<Tracker>(&resp).unwrap();
-
-    // Get peers
-    let vec: Vec<u8> = tracker.peers.into_vec();
-    let chunks: Vec<&[u8]> = vec.chunks(6).collect();
-    let peers: Vec<SocketAddr> = chunks.iter().map(|chunk| peer_to_socket_addr(chunk)).collect();
-
-    // Create the handshake
-    let handshake = create_handshake(&info_hash, &peer_id);
-
-    // Sequential version
-    for &peer_addr in &peers {
-        let handshake_copy = handshake.clone();
-        match sequential_handle_peer(&peer_addr, handshake_copy, &info_hash, &piece_work_collection) {
-            Ok(_) => {}
-            Err(e) => println!("Failed to handle peer {:?}: {:?}", peer_addr.to_string(), e)
-        }
-    }
-
-
-    // Make the handshake
-    // let mut handles: Vec<JoinHandle<()>> = Vec::new();
-    // for &peer_addr in &peers {
-    //     let handshake_copy = handshake.clone();
-    //     let piece_work_receiver_copy = piece_work_receiver.clone();
-    //     let handle = thread::spawn(move || {
-    //         let _ = handle_peer(peer_addr, handshake_copy, &info_hash, piece_work_receiver_copy);
-    //     });
-    //
-    //     handles.push(handle);
-    // }
-    //
-    // for handle in handles { handle.join().unwrap() }
-    Ok(())
-}
-
-fn sequential_handle_peer(peer_addr: &SocketAddr, handshake: Vec<u8>, info_hash: &[u8], piece_work_collection: &Vec<PieceWork>) -> anyhow::Result<()> {
-    // Connect to peer
-    println!("Attempting to connect to peer: {:?}...", peer_addr.to_string());
-    let mut stream = TcpStream::connect_timeout(&peer_addr, Duration::from_secs(3))?;
-    println!("Successfully connected to peer {:?}!", peer_addr.to_string());
-
-    // Send handshake
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    stream.write(&handshake)?;
-
-    // Read PstrLen
-    let mut pstrlen_buf = [0u8; 1];
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    stream.read(&mut pstrlen_buf)?;
-    let pstrlen = pstrlen_buf[0] as usize;
-    ensure!(pstrlen != 0, "Pstrlen cannot be 0");
-
-    // Get info hash and peer id
-    let mut handshake_buf = vec![0u8; pstrlen + 8 + 20 + 20];
-    stream.read(&mut handshake_buf)?;
-    let peer_info_hash = &handshake_buf[pstrlen + 8..pstrlen + 8 + 20];
-    let _ = &handshake_buf[pstrlen + 8 + 20..];
-
-    // Compare info hashes
-    ensure!(compare_info_hashes(&info_hash, &peer_info_hash).is_eq(), "Incompatible info hashes");
-
-    // Get potential bitfield message length
-    let mut message_length_buf = [0u8; 4];
-    stream.read(&mut message_length_buf)?;
-    let mut msg_length_cursor = Cursor::new(message_length_buf);
-    let message_length = msg_length_cursor.read_u32::<BigEndian>().unwrap() as usize;
-    ensure!(message_length != 0, "Was not expecting a keep alive message");
-
-    // Get bitfield message
-    let mut bitfield_buf = vec![0u8; message_length];
-    stream.read(&mut bitfield_buf)?;
-    let message_id = bitfield_buf[0];
-    ensure!(message_id == MSG_BITFIELD, "Expected bitfield message, got {:?}", message_id);
-    let peer_bitfield = &bitfield_buf[1..];
-
-    // Send Unchoke
-    let unchoke_buf: [u8; 5] = [0, 0, 0, 1, MSG_UNCHOKE];
-    stream.write(&unchoke_buf)?;
-
-    // Send Interested
-    let interested_buf: [u8; 5] = [0, 0, 0, 1, MSG_INTERESTED];
-    stream.write(&interested_buf)?;
-
-    for piece_work in piece_work_collection {
-        let byte_index = piece_work.index / 8;
-        let offset = piece_work.index % 8;
-        if byte_index < 0 || byte_index >= peer_bitfield.len() {
-            continue;
-        }
-        if peer_bitfield[byte_index] >> (7 - offset) & 1 == 0 {
-            continue;
-        }
-        stream.set_read_timeout(Some(Duration::from_secs(30)));
-    }
-
     Ok(())
 }
 
@@ -406,21 +222,44 @@ fn main() -> anyhow::Result<()> {
     let chunks: Vec<&[u8]> = vec.chunks(6).collect();
     let peers: Vec<SocketAddr> = chunks.iter().map(|chunk| peer_to_socket_addr(chunk)).collect();
 
+    // Get piece hashes
+    let piece_hashes = torrent.info.piece_hashes();
+
+    // Get piece_hashes
+    let (piece_request_sender, piece_request_receiver): (Sender<PieceRequest>, Receiver<PieceRequest>) = crossbeam_channel::bounded(piece_hashes.len());
+    for (index, &piece_hash) in piece_hashes.iter().enumerate() {
+        let vec = piece_hash.to_vec();
+        let piece_req = PieceRequest {
+            index,
+            piece_hash: vec,
+        };
+        piece_request_sender.send(piece_req);
+    }
+
     // Iterate over peers
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
     for &peer in &peers {
+        let piece_request_receiver_copy = piece_request_receiver.clone();
+        let piece_request_sender_copy = piece_request_sender.clone();
         let handle = thread::spawn(move || {
-            connect_to_peer(peer, info_hash, peer_id);
+            start_worker(peer, info_hash, peer_id, piece_request_receiver_copy, piece_request_sender_copy);
         });
         handles.push(handle);
     }
 
+    // Join handles
     for handle in handles { handle.join(); }
 
     Ok(())
 }
 
-fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> anyhow::Result<()> {
+#[derive(Debug)]
+struct PieceRequest {
+    piece_hash: Vec<u8>,
+    index: usize,
+}
+
+fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> anyhow::Result<Connection> {
     // Initialize connection
     let mut stream = TcpStream::connect_timeout(&peer, Duration::from_secs(3))?;
 
@@ -466,33 +305,75 @@ fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> 
     ensure!(bitfield_msg.id == MessageId::BitField, "Was expecting a bitfield");
 
     // Create the connection
-    let mut conn = Connection {
+    Ok(Connection {
         choked: true,
         bitfield: bitfield_msg.payload,
         peer_id: seeder_peer_id,
-    };
+        stream,
+    })
+}
 
-    // Send Unchoke
-    let unchoke_buf: [u8; 5] = [0, 0, 0, 1, MSG_UNCHOKE];
-    stream.write(&unchoke_buf)?;
+const MAX_BLOCK_SIZE: u16 = 16384;
+
+
+fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_request_receiver: Receiver<PieceRequest>, piece_request_sender: Sender<PieceRequest>) -> anyhow::Result<()> {
+    // Establish connection
+    let mut conn = connect_to_peer(peer, info_hash, peer_id)?;
 
     // Send Interested
     let interested_buf: [u8; 5] = [0, 0, 0, 1, MSG_INTERESTED];
-    stream.write(&interested_buf)?;
+    conn.stream.write(&interested_buf)?;
 
-    // Receive unchoke
-    loop {
-        let msg = read_message(&stream)?;
-        println!("{:?} sent message: {:?}", conn.peer_id, msg.id);
-        match msg.id {
-            MessageId::UnChoke => { conn.choked = false; }
-            MessageId::Choke => { conn.choked = true; }
-            _ => {}
+    // Loop over pieces
+    for piece_request in piece_request_receiver {
+        // Check if peer has piece
+        println!("Checking if peer {:?} has piece index {:?}", conn.peer_id, piece_request.index);
+        let has_piece = bitfield_contains_index(&conn.bitfield, piece_request.index);
+
+        // If they don't put it back in the queue
+        if !has_piece {
+            piece_request_sender.send(piece_request);
+            continue;
         }
+        println!("Peer {:?} has piece index {:?}", conn.peer_id, piece_request.index);
+
+        // Otherwise download it
+
+        // Check integrity
+
+        // Send Have message
+
+        // Send to results collection
     }
 
-
     Ok(())
+
+    // loop {
+    //     if !conn.choked {
+    //         // println!("You are unchoked!");
+    //         ensure!(!piece_request_receiver.is_empty(), "Piece request receiver is empty");
+    //         for piece_request in &piece_request_receiver {
+    //             println!("Checking if peer {:?} has piece index {:?}", conn.peer_id, piece_request.index);
+    //             println!("{:?}", piece_request_receiver.len());
+    //         }
+    //     }
+    //     let msg = read_message(&conn.stream)?;
+    //     println!("{:?} sent message: {:?}", conn.peer_id, msg.id);
+    //     match msg.id {
+    //         MessageId::UnChoke => { conn.choked = false; }
+    //         MessageId::Choke => { conn.choked = true; }
+    //         _ => {}
+    //     }
+    // }
+}
+
+fn bitfield_contains_index(bitfield: &Vec<u8>, index: usize) -> bool {
+    let byte_index = index / 8;
+    let offset = index % 8;
+    if byte_index < 0 || byte_index >= bitfield.len() {
+        return false;
+    }
+    return bitfield[byte_index] >> (7 - offset) & 1 != 0;
 }
 
 fn read_message(mut stream: &TcpStream) -> anyhow::Result<Message> {
@@ -520,6 +401,7 @@ struct Connection {
     choked: bool,
     bitfield: Vec<u8>,
     peer_id: String,
+    stream: TcpStream,
 }
 
 struct Message {
