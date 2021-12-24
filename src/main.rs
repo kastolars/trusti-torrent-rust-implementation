@@ -11,6 +11,7 @@ use serde_bytes::ByteBuf;
 use sha1::{Sha1};
 use urlencoding::{encode_binary};
 use std::error::Error as StdError;
+use anyhow::{bail, ensure};
 use crossbeam_channel as channel;
 use crossbeam_channel::Receiver;
 
@@ -47,7 +48,6 @@ struct Tracker {
 fn generate_peer_id() -> Vec<u8> {
     return (0..20).map(|_| { rand::random::<u8>() }).collect();
 }
-
 
 impl Info {
     fn hash(&self) -> [u8; 20] {
@@ -187,9 +187,7 @@ fn handle_peer(peer_addr: SocketAddr, handshake_copy: Vec<u8>, info_hash: &[u8],
 
     for piece_work in piece_work_receiver {
         println!("{:?}", piece_work);
-        let byte
     }
-
 
     Ok(())
 }
@@ -232,6 +230,8 @@ fn main() -> Result<(), Box<dyn StdError>> {
     let piece_hashes = torrent.info.piece_hashes();
     let (piece_work_sender, piece_work_receiver): (crossbeam_channel::Sender<PieceWork>, crossbeam_channel::Receiver<PieceWork>) = channel::bounded(piece_hashes.len());
     let (result_sender, result_receiver): (crossbeam_channel::Sender<PieceResult>, crossbeam_channel::Receiver<PieceResult>) = channel::unbounded();
+
+    let mut piece_work_collection: Vec<PieceWork> = Vec::new();
     for (index, &piece_hash) in piece_hashes.iter().enumerate() {
         let length = calculate_piece_size(index, torrent.info.piece_length, torrent.info.length);
         let piece_work = PieceWork {
@@ -239,7 +239,8 @@ fn main() -> Result<(), Box<dyn StdError>> {
             hash: piece_hash.to_vec(),
             length,
         };
-        piece_work_sender.send(piece_work);
+        // piece_work_sender.send(piece_work);
+        piece_work_collection.push(piece_work);
     }
 
 
@@ -264,19 +265,94 @@ fn main() -> Result<(), Box<dyn StdError>> {
     // Create the handshake
     let handshake = create_handshake(&info_hash, &peer_id);
 
-    // Make the handshake
-    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    // Sequential version
     for &peer_addr in &peers {
         let handshake_copy = handshake.clone();
-        let piece_work_receiver_copy = piece_work_receiver.clone();
-        let handle = thread::spawn(move || {
-            let _ = handle_peer(peer_addr, handshake_copy, &info_hash, piece_work_receiver_copy);
-        });
+        match sequential_handle_peer(&peer_addr, handshake_copy, &info_hash, &piece_work_collection) {
+            Ok(_) => {},
+            Err(e) => println!("Failed to handle peer {:?}: {:?}", peer_addr.to_string(), e)
 
-        handles.push(handle);
+        }
     }
 
-    for handle in handles { handle.join().unwrap() }
+
+    // Make the handshake
+    // let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    // for &peer_addr in &peers {
+    //     let handshake_copy = handshake.clone();
+    //     let piece_work_receiver_copy = piece_work_receiver.clone();
+    //     let handle = thread::spawn(move || {
+    //         let _ = handle_peer(peer_addr, handshake_copy, &info_hash, piece_work_receiver_copy);
+    //     });
+    //
+    //     handles.push(handle);
+    // }
+    //
+    // for handle in handles { handle.join().unwrap() }
+    Ok(())
+}
+
+fn sequential_handle_peer(peer_addr: &SocketAddr, handshake: Vec<u8>, info_hash: &[u8], piece_work_collection: &Vec<PieceWork>) -> anyhow::Result<()> {
+    // Connect to peer
+    println!("Attempting to connect to peer: {:?}...", peer_addr.to_string());
+    let mut stream = TcpStream::connect_timeout(&peer_addr, Duration::from_secs(3))?;
+    println!("Successfully connected to peer {:?}!", peer_addr.to_string());
+
+    // Send handshake
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    stream.write(&handshake)?;
+
+    // Read PstrLen
+    let mut pstrlen_buf = [0u8; 1];
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.read(&mut pstrlen_buf)?;
+    let pstrlen = pstrlen_buf[0] as usize;
+    ensure!(pstrlen != 0, "Pstrlen cannot be 0");
+
+    // Get info hash and peer id
+    let mut handshake_buf = vec![0u8; pstrlen + 8 + 20 + 20];
+    stream.read(&mut handshake_buf)?;
+    let peer_info_hash = &handshake_buf[pstrlen + 8..pstrlen + 8 + 20];
+    let _ = &handshake_buf[pstrlen + 8 + 20..];
+
+    // Compare info hashes
+    ensure!(compare_info_hashes(&info_hash, &peer_info_hash).is_eq(), "Incompatible info hashes");
+
+    // Get potential bitfield message length
+    let mut message_length_buf = [0u8; 4];
+    stream.read(&mut message_length_buf)?;
+    let mut msg_length_cursor = Cursor::new(message_length_buf);
+    let message_length = msg_length_cursor.read_u32::<BigEndian>().unwrap() as usize;
+    ensure!(message_length != 0, "Was not expecting a keep alive message");
+
+    // Get bitfield message
+    let mut bitfield_buf = vec![0u8; message_length];
+    stream.read(&mut bitfield_buf)?;
+    let message_id = bitfield_buf[0];
+    ensure!(message_id == MSG_BITFIELD, "Expected bitfield message, got {:?}", message_id);
+    let peer_bitfield = &bitfield_buf[1..];
+
+    // Send Unchoke
+    let unchoke_buf: [u8; 5] = [0, 0, 0, 1, MSG_UNCHOKE];
+    stream.write(&unchoke_buf)?;
+
+    // Send Interested
+    let interested_buf: [u8; 5] = [0, 0, 0, 1, MSG_INTERESTED];
+    stream.write(&interested_buf)?;
+
+    for piece_work in piece_work_collection {
+        let byte_index = piece_work.index / 8;
+        let offset = piece_work.index % 8;
+        if byte_index < 0 || byte_index >= peer_bitfield.len() {
+            continue
+        }
+        if peer_bitfield[byte_index] >> (7-offset)&1 == 0 {
+            continue
+        }
+        stream.set_read_timeout(Some(Duration::from_secs(30)));
+        
+    }
+
     Ok(())
 }
 
