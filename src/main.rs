@@ -10,23 +10,12 @@ use serde_derive::{Serialize, Deserialize};
 use serde_bytes::ByteBuf;
 use sha1::{Sha1};
 use urlencoding::{encode_binary};
-use std::error::Error as StdError;
-use anyhow::{anyhow, ensure};
-use crossbeam_channel as channel;
+use anyhow::{ensure};
 use crossbeam_channel::{Receiver, Sender};
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
 
-const MSG_CHOKE: u8 = 0;
-const MSG_UNCHOKE: u8 = 1;
 const MSG_INTERESTED: u8 = 2;
-const MSG_NOT_INTERESTED: u8 = 3;
-const MSG_HAVE: u8 = 4;
-const MSG_BITFIELD: u8 = 5;
-const MSG_REQUEST: u8 = 6;
-const MSG_PIECE: u8 = 7;
-const MSG_CANCEL: u8 = 8;
-const MSG_KEEP_ALIVE: u8 = 9;
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
 #[repr(u8)]
@@ -161,33 +150,6 @@ fn calculate_piece_size(index: usize, piece_length: u64, length: u64) -> usize {
 }
 
 
-fn original() -> Result<(), Box<dyn StdError>> {
-    // Hardcoded local filepath
-    let path = "C:\\Users\\kasto\\IdeaProjects\\trusti\\src\\debian-11.2.0-amd64-netinst.iso.torrent";
-
-    // Parse the torrent file
-    let torrent = Torrent::from(path);
-
-    // Create the channels for maintaining work
-    let piece_hashes = torrent.info.piece_hashes();
-    let (piece_work_sender, piece_work_receiver): (crossbeam_channel::Sender<PieceWork>, crossbeam_channel::Receiver<PieceWork>) = channel::bounded(piece_hashes.len());
-    let (result_sender, result_receiver): (crossbeam_channel::Sender<PieceResult>, crossbeam_channel::Receiver<PieceResult>) = channel::unbounded();
-
-    let mut piece_work_collection: Vec<PieceWork> = Vec::new();
-    for (index, &piece_hash) in piece_hashes.iter().enumerate() {
-        let length = calculate_piece_size(index, torrent.info.piece_length, torrent.info.length);
-        let piece_work = PieceWork {
-            index,
-            hash: piece_hash.to_vec(),
-            length,
-        };
-        // piece_work_sender.send(piece_work);
-        piece_work_collection.push(piece_work);
-    }
-
-    Ok(())
-}
-
 fn main() -> anyhow::Result<()> {
     // Hardcoded local filepath
     let path = "C:\\Users\\kasto\\IdeaProjects\\trusti\\src\\debian-11.2.0-amd64-netinst.iso.torrent";
@@ -233,7 +195,7 @@ fn main() -> anyhow::Result<()> {
             index,
             piece_hash: vec,
         };
-        piece_request_sender.send(piece_req);
+        piece_request_sender.send(piece_req)?;
     }
 
     // Iterate over peers
@@ -242,13 +204,13 @@ fn main() -> anyhow::Result<()> {
         let piece_request_receiver_copy = piece_request_receiver.clone();
         let piece_request_sender_copy = piece_request_sender.clone();
         let handle = thread::spawn(move || {
-            start_worker(peer, info_hash, peer_id, piece_request_receiver_copy, piece_request_sender_copy);
+            let _ = start_worker(peer, info_hash, peer_id, piece_request_receiver_copy, piece_request_sender_copy);
         });
         handles.push(handle);
     }
 
     // Join handles
-    for handle in handles { handle.join(); }
+    for handle in handles { let _ = handle.join(); }
 
     Ok(())
 }
@@ -278,7 +240,7 @@ fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> 
     stream.write(&handshake)?;
 
     // Read Pstrlen
-    stream.set_read_timeout(Some(Duration::from_secs(3)));
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     let mut pstrlen_buf = [0u8; 1];
     stream.read(&mut pstrlen_buf)?;
     let pstrlen = pstrlen_buf[0] as usize;
@@ -328,11 +290,11 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
     for piece_request in piece_request_receiver {
         // Check if peer has piece
         println!("Checking if peer {:?} has piece index {:?}", conn.peer_id, piece_request.index);
-        let has_piece = bitfield_contains_index(&conn.bitfield, piece_request.index);
+        let has_piece = bitfield_contains_index(&conn.bitfield, piece_request.index as isize);
 
         // If they don't put it back in the queue
         if !has_piece {
-            piece_request_sender.send(piece_request);
+            piece_request_sender.send(piece_request)?;
             continue;
         }
         println!("Peer {:?} has piece index {:?}", conn.peer_id, piece_request.index);
@@ -348,15 +310,7 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
 
     Ok(())
 
-    // loop {
-    //     if !conn.choked {
-    //         // println!("You are unchoked!");
-    //         ensure!(!piece_request_receiver.is_empty(), "Piece request receiver is empty");
-    //         for piece_request in &piece_request_receiver {
-    //             println!("Checking if peer {:?} has piece index {:?}", conn.peer_id, piece_request.index);
-    //             println!("{:?}", piece_request_receiver.len());
-    //         }
-    //     }
+
     //     let msg = read_message(&conn.stream)?;
     //     println!("{:?} sent message: {:?}", conn.peer_id, msg.id);
     //     match msg.id {
@@ -364,16 +318,15 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
     //         MessageId::Choke => { conn.choked = true; }
     //         _ => {}
     //     }
-    // }
 }
 
-fn bitfield_contains_index(bitfield: &Vec<u8>, index: usize) -> bool {
+fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
     let byte_index = index / 8;
     let offset = index % 8;
-    if byte_index < 0 || byte_index >= bitfield.len() {
+    if byte_index < 0 || byte_index >= bitfield.len() as isize {
         return false;
     }
-    return bitfield[byte_index] >> (7 - offset) & 1 != 0;
+    return bitfield[byte_index as usize] >> (7 - offset) & 1 != 0;
 }
 
 fn read_message(mut stream: &TcpStream) -> anyhow::Result<Message> {
