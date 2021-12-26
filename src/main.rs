@@ -1,38 +1,17 @@
-use std::{cmp, fs, thread};
+use std::borrow::Borrow;
+use std::{cmp, fs};
 use std::cmp::Ordering;
 use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::thread::JoinHandle;
 use std::time::Duration;
+use anyhow::ensure;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use serde_bencode::{de};
-use serde_derive::{Serialize, Deserialize};
+use serde_bencode::de;
 use serde_bytes::ByteBuf;
-use sha1::{Sha1};
-use urlencoding::{encode_binary};
-use anyhow::{anyhow, bail, ensure};
-use crossbeam_channel::{Receiver, Sender};
-use num_enum::TryFromPrimitive;
-use num_enum::IntoPrimitive;
-use std::convert::TryFrom;
-use std::ptr::hash;
+use serde_derive::{Serialize, Deserialize};
+use sha1::Sha1;
+use urlencoding::encode_binary;
 
-const MSG_INTERESTED: u8 = 2;
-
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
-#[repr(u8)]
-enum MessageId {
-    Choke,
-    UnChoke,
-    Interested,
-    NotInterested,
-    Have,
-    BitField,
-    Request,
-    Piece,
-    Cancel,
-    KeepAlive,
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Info {
@@ -54,109 +33,38 @@ struct Tracker {
     peers: ByteBuf,
 }
 
-
-impl Info {
-    fn hash(&self) -> anyhow::Result<[u8; 20]> {
-        let serialized_info = serde_bencode::to_bytes(&self)?;
-        let mut hasher = Sha1::new();
-        hasher.update(serialized_info.as_slice());
-        Ok(hasher.digest().bytes())
-    }
-
-    fn piece_hashes(&self) -> Vec<&[u8]> {
-        let pieces = self.pieces.as_ref();
-        return pieces.chunks(20).collect();
-    }
-}
-
-impl From<&str> for Torrent {
-    fn from(path: &str) -> Self {
-        let contents = fs::read(path).expect("Something went wrong reading the file");
-        return de::from_bytes::<Torrent>(&contents).unwrap();
-    }
-}
-
-fn peer_to_socket_addr(chunk: &[u8]) -> SocketAddr {
+fn peer_to_socket_addr(chunk: &[u8]) -> anyhow::Result<SocketAddr> {
     // Split chunk into ip octet and big endian port
     let (ip_octets, port) = chunk.split_at(4);
 
     // Get the ip address
-    let ip_slice_to_array: [u8; 4] = ip_octets.try_into().unwrap();
+    let ip_slice_to_array: [u8; 4] = ip_octets.try_into()?;
     let ip_addr = Ipv4Addr::from(ip_slice_to_array);
 
     // Get the port
     let mut rdr = Cursor::new(port);
-    let port_fixed = rdr.read_u16::<BigEndian>().unwrap();
+    let port_fixed = rdr.read_u16::<BigEndian>()?;
 
     // Create socket address
-    return SocketAddr::new(IpAddr::V4(ip_addr), port_fixed);
-}
-
-fn build_tracker_url(torrent: Torrent, info_hash: &[u8], peer_id: &[u8]) -> String {
-    let announce = torrent.announce.as_str();
-    let ih = encode_binary(&info_hash);
-    let pid = encode_binary(&peer_id);
-    let left = torrent.info.length.to_string();
-    return format!("{}?compact=1&downloaded=0&port=6881&uploaded=0&info_hash={}&peer_id={}&left={}", announce, ih.as_ref(), pid.as_ref(), left.as_str());
-}
-
-fn create_handshake(info_hash: &[u8], peer_id: &[u8]) -> Vec<u8> {
-    let mut handshake: Vec<u8> = Vec::new();
-    let protocol_id = "BitTorrent protocol";
-    let protocol_id_length: u8 = protocol_id.len().try_into().unwrap();
-    handshake.push(protocol_id_length);
-    handshake.extend(protocol_id.bytes());
-    handshake.extend([0u8; 8]);
-    handshake.extend(info_hash);
-    handshake.extend(peer_id);
-    return handshake;
-}
-
-
-fn compare_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
-    for (ai, bi) in a.iter().zip(b.iter()) {
-        match ai.cmp(&bi) {
-            Ordering::Equal => continue,
-            ord => return ord
-        }
-    }
-
-    a.len().cmp(&b.len())
-}
-
-
-struct PieceResult {
-    index: usize,
-    buf: Vec<u8>,
-}
-
-fn calculate_piece_size(index: usize, piece_length: usize, length: usize) -> usize {
-    let begin = index * piece_length;
-    let mut end = begin + piece_length;
-    if end > length {
-        end = length
-    }
-    return end - begin;
+    Ok(SocketAddr::new(IpAddr::V4(ip_addr), port_fixed))
 }
 
 
 fn main() -> anyhow::Result<()> {
-    // Hardcoded local filepath
+    // Parse torrent
     let path = "C:\\Users\\kasto\\IdeaProjects\\trusti\\src\\debian-11.2.0-amd64-netinst.iso.torrent";
-
-    // Parse the torrent file
     let contents = fs::read(path).expect("Something went wrong reading the file");
     let torrent = de::from_bytes::<Torrent>(&contents)?;
 
     // Info hash
     let serialized_info = serde_bencode::to_bytes(&torrent.info)?;
     let mut hasher = Sha1::new();
-    hasher.update(serialized_info.as_slice());
+    hasher.update(serialized_info.borrow());
     let info_hash = hasher.digest().bytes();
 
     // Peer id
     let random_bytes: Vec<u8> = (0..20).map(|_| { rand::random::<u8>() }).collect();
-    let peer_id: [u8; 20] = <[u8; 20]>::try_from(random_bytes.as_slice())?;
+    let peer_id: [u8; 20] = <[u8; 20]>::try_from(random_bytes.borrow())?;
 
     // Tracker url
     let announce = torrent.announce.as_str();
@@ -170,224 +78,118 @@ fn main() -> anyhow::Result<()> {
     let tracker = de::from_bytes::<Tracker>(&resp)?;
 
     // Get peers
-    let vec: Vec<u8> = tracker.peers.into_vec();
-    let chunks: Vec<&[u8]> = vec.chunks(6).collect();
-    let peers: Vec<SocketAddr> = chunks.iter().map(|chunk| peer_to_socket_addr(chunk)).collect();
-
-    // Get piece hashes
-    let piece_hashes = torrent.info.piece_hashes();
-
-    // Get piece_hashes
-    let (piece_request_sender, piece_request_receiver): (Sender<PieceRequest>, Receiver<PieceRequest>) = crossbeam_channel::bounded(piece_hashes.len());
-    for (index, &piece_hash) in piece_hashes.iter().enumerate() {
-        let vec = piece_hash.to_vec();
-        let length = calculate_piece_size(index, torrent.info.piece_length as usize, torrent.info.length as usize);
-        let piece_req = PieceRequest {
-            index,
-            piece_hash: vec,
-            length,
-        };
-        piece_request_sender.send(piece_req)?;
+    let tracker_vec: Vec<u8> = tracker.peers.into_vec();
+    let chunks: Vec<&[u8]> = tracker_vec.chunks(6).collect();
+    let mut peers = Vec::<SocketAddr>::new();
+    for chunk in chunks {
+        let sock = peer_to_socket_addr(chunk)?;
+        peers.push(sock);
     }
 
-    // Iterate over peers
-    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    // Piece hashes
+    let pieces = torrent.info.pieces.as_ref();
+    let piece_hashes: Vec<&[u8]> = pieces.chunks(20).collect();
+
     for &peer in &peers {
-        let piece_request_receiver_copy = piece_request_receiver.clone();
-        let piece_request_sender_copy = piece_request_sender.clone();
-        let handle = thread::spawn(move || {
-            let _ = start_worker(peer, info_hash, peer_id, piece_request_receiver_copy, piece_request_sender_copy);
-        });
-        handles.push(handle);
+        let _ = start_worker(peer, info_hash, peer_id, &piece_hashes);
     }
-
-    // Join handles
-    for handle in handles { let _ = handle.join(); }
 
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct PieceRequest {
-    piece_hash: Vec<u8>,
-    index: usize,
-    length: usize,
-}
-
-fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> anyhow::Result<Connection> {
-    // Initialize connection
-    let mut stream = TcpStream::connect_timeout(&peer, Duration::from_secs(3))?;
-
-    // Create handshake
+fn create_handshake(pstr: &str, info_hash: [u8; 20], peer_id: [u8; 20]) -> Vec<u8> {
     let mut handshake: Vec<u8> = Vec::new();
-    let protocol_id = "BitTorrent protocol";
-    let protocol_id_length = protocol_id.len() as u8;
-    handshake.push(protocol_id_length);
-    handshake.extend(protocol_id.bytes());
+    let pstrlen = pstr.len() as u8;
+    handshake.push(pstrlen);
+    handshake.extend(pstr.bytes());
     handshake.extend([0u8; 8]);
     handshake.extend(info_hash);
     handshake.extend(peer_id);
+    return handshake;
+}
+
+fn compare_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        match ai.cmp(&bi) {
+            Ordering::Equal => continue,
+            ord => return ord
+        }
+    }
+
+    a.len().cmp(&b.len())
+}
+
+fn receive_handshake(mut stream: &TcpStream, info_hash: [u8; 20]) -> anyhow::Result<String> {
+    let protocol = "BitTorrent protocol";
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    let mut pstrlen_buf = [0u8; 1];
+    stream.read(&mut pstrlen_buf)?;
+    let pstrlen: usize = pstrlen_buf[0].into();
+    ensure!(pstrlen != 0, "Pstrlen cannot be zero");
+    let mut pstr_buf = vec![0u8; pstrlen];
+    stream.read(&mut pstr_buf)?;
+    let pstr = String::from_utf8(pstr_buf)?;
+    ensure!(pstr == protocol, "Peer does not use BitTorrent protocol");
+    let mut handshake_buf = [0u8; 48];
+    stream.read(&mut handshake_buf)?;
+    let peer_info_hash = &handshake_buf[8..8 + 20];
+    let peer_id = &handshake_buf[8 + 20..];
+    ensure!(compare_hashes(&info_hash, peer_info_hash).is_eq(), "Info hashes do not match");
+    let peer_string_id = String::from_utf8(peer_id.to_vec())?;
+    Ok(peer_string_id)
+}
+
+struct Message {
+    id: u8,
+    payload: Vec<u8>,
+}
+
+fn read_message(mut stream: &TcpStream) -> anyhow::Result<Message> {
+    let mut message_length_buf = [0u8; 4];
+    stream.read(&mut message_length_buf)?;
+    let mut rdr = Cursor::new(message_length_buf);
+    let message_length = rdr.read_u32::<BigEndian>().unwrap() as usize;
+    if message_length == 0 {
+        return Ok(Message { id: 0, payload: vec![] });
+    }
+    let mut message_buf = vec![0u8; message_length];
+    stream.read(&mut message_buf)?;
+    let id = message_buf[0];
+    let payload = &message_buf[1..];
+    Ok(Message { id, payload: payload.to_vec() })
+}
+
+struct Connection {
+    stream: TcpStream,
+    peer_id: String,
+    bitfield: Vec<u8>,
+    choked: bool,
+}
+
+fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> anyhow::Result<Connection> {
+    let mut stream = TcpStream::connect_timeout(&peer, Duration::from_secs(3))?;
+
+    // Create handshake
+    let protocol = "BitTorrent protocol";
+    let handshake = create_handshake(protocol, info_hash, peer_id);
 
     // Send handshake
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     stream.write(&handshake)?;
 
-    // Read Pstrlen
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    let mut pstrlen_buf = [0u8; 1];
-    stream.read(&mut pstrlen_buf)?;
-    let pstrlen = pstrlen_buf[0] as usize;
-    ensure!(pstrlen != 0, "PstrLen cannot be 0!");
-
-    // Get Pstr
-    let mut pstr_buf = vec![0u8; pstrlen];
-    stream.read(&mut pstr_buf)?;
-    let peer_protocol = String::from_utf8(pstr_buf)?;
-    ensure!(peer_protocol == protocol_id, "Must use BitTorrent protocol");
-
-    // Get info hash and peer_id
-    let mut handshake_buf = vec![0u8; 48];
-    stream.read(&mut handshake_buf)?;
-    let peer_info_hash = &handshake_buf[8..8 + 20];
-    let seeder_peer_id = String::from_utf8(handshake_buf[8 + 20..].to_vec())?;
-
-    // Compare info hashes
-    ensure!(compare_hashes(&info_hash, peer_info_hash).is_eq(), "Mismatched info hashes");
-    // println!("Completed handshake with peer {:?}", seeder_peer_id);
+    // Receive handshake
+    let remote_peer_id_string = receive_handshake(&stream, info_hash)?;
 
     // Receive bitfield
     let bitfield_msg = read_message(&stream)?;
-    ensure!(bitfield_msg.id == MessageId::BitField, "Was expecting a bitfield");
+    ensure!(bitfield_msg.id == 5, "Was expecting a bitfield");
 
-    // Create the connection
-    Ok(Connection {
+    return Ok(Connection {
         choked: true,
-        bitfield: bitfield_msg.payload,
-        peer_id: seeder_peer_id,
         stream,
-    })
-}
-
-const MAX_BLOCK_SIZE: u32 = 16384;
-const MAX_PIPELINED_REQUESTS: u8 = 5;
-
-
-fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_request_receiver: Receiver<PieceRequest>, piece_request_sender: Sender<PieceRequest>) -> anyhow::Result<()> {
-    // Establish connection
-    let mut conn = connect_to_peer(peer, info_hash, peer_id)?;
-
-    // Send Interested
-    let interested_buf: [u8; 5] = [0, 0, 0, 1, MSG_INTERESTED];
-    conn.stream.write(&interested_buf)?;
-
-    // Loop over pieces
-    for piece_request in piece_request_receiver {
-        // Check if peer has piece
-        let has_piece = bitfield_contains_index(&conn.bitfield, piece_request.index as isize);
-
-        // If they don't put it back in the queue
-        if !has_piece {
-            piece_request_sender.send(piece_request)?;
-            continue;
-        }
-
-        // Download
-        if download_piece(&piece_request, &mut conn).is_err() {
-            piece_request_sender.send(piece_request.clone())?;
-            return Err(anyhow!("Failed to download piece"));
-        }
-
-        // Send Have
-        let mut crsr = Cursor::new(vec![]);
-        crsr.write_u32::<BigEndian>(1 + 4)?;
-        crsr.write_u8(MessageId::Have.into())?;
-        crsr.write_u32::<BigEndian>(piece_request.index as u32)?;
-        let have_message = crsr.get_mut();
-        conn.stream.write(have_message)?;
-
-        // Otherwise download it
-        // let mut num_bytes_downloaded = 0usize;
-        // let mut num_bytes_requested = 0usize;
-        // // let mut num_pipelined_requests = 0u8;
-        // let mut piece_buf = vec![0u8; piece_request.length];
-        // let piece_request_copy = piece_request.clone();
-        // while num_bytes_downloaded < piece_request.length {
-        //     println!("Num bytes downloaded from {:?}: {}/{}", conn.peer_id, num_bytes_downloaded, piece_request.length);
-        //     // If we are not choked, send requests
-        //     if !conn.choked {
-        //         // Pipeline requests
-        //         // num_pipelined_requests < MAX_PIPELINED_REQUESTS &&
-        //         while num_bytes_requested < piece_request.length {
-        //             let mut block_size = MAX_BLOCK_SIZE;
-        //             if piece_request_copy.length - num_bytes_requested < block_size as usize {
-        //                 block_size = (piece_request_copy.length - num_bytes_requested) as u16
-        //             }
-        //
-        //             // Send Request here
-        //             let mut crsr = Cursor::new(vec![]);
-        //             crsr.write_u32::<BigEndian>(1 + 4 * 3)?;
-        //             crsr.write_u8(MessageId::Request.into())?;
-        //             crsr.write_u32::<BigEndian>(piece_request_copy.index as u32)?;
-        //             crsr.write_u32::<BigEndian>(num_bytes_requested as u32)?;
-        //             crsr.write_u32::<BigEndian>(block_size as u32)?;
-        //             let payload = crsr.get_mut();
-        //             if conn.stream.write(payload).is_err() {
-        //                 piece_request_sender.send(piece_request.clone())?;
-        //                 return Err(anyhow!(""));
-        //             }
-        //
-        //             // num_pipelined_requests += 1;
-        //             num_bytes_requested += block_size as usize;
-        //         }
-        //     }
-
-        // Receive messages
-        //     let msg = read_message(&conn.stream)?;
-        //     match msg.id {
-        //         MessageId::UnChoke => { conn.choked = false; }
-        //         MessageId::Choke => { conn.choked = true; }
-        //         MessageId::Piece => {
-        //             if msg.payload.len() < 8 {
-        //                 println!("Payload must be at least size 8");
-        //                 return Err(anyhow!("Payload must be at least size 8"));
-        //             }
-        //             println!("Received {:?} message from {:?}", msg.id, conn.peer_id);
-        //             let mut crsr = Cursor::new(msg.payload);
-        //             let piece_index = crsr.read_u32::<BigEndian>()? as usize;
-        //             if piece_index != piece_request.index {
-        //                 println!("Mismatched piece index");
-        //                 return Err(anyhow!("Mismatched piece index."));
-        //             }
-        //             let begin = crsr.read_u32::<BigEndian>()? as usize;
-        //             if begin >= piece_buf.len() {
-        //                 println!("Begin must be less than the length of the buffer");
-        //                 return Err(anyhow!("Begin must be less than the length of the buffer"));
-        //             }
-        //             let data = &crsr.get_ref()[8..];
-        //             piece_buf.splice(begin..begin, data.iter().cloned());
-        //             num_pipelined_requests -= 1;
-        //             num_bytes_downloaded += data.len();
-        //         }
-        //         _ => {}
-        //     }
-        // }
-
-        // Check integrity - put it back on the work queue if it's incorrect
-        // let mut hasher = Sha1::new();
-        // hasher.update(piece_buf.as_ref());
-        // let result = hasher.digest().bytes();
-        // if !compare_hashes(piece_request.piece_hash.as_ref(), result.as_slice()).is_eq() {
-        //     piece_request_sender.send(piece_request.clone())?;
-        //     continue;
-        // }
-
-        // TODO: Send Have message
-        // println!("Sending have message to {:?}", conn.peer_id);
-
-        // TODO: Send to results collection
-    }
-
-    Ok(())
+        peer_id: remote_peer_id_string,
+        bitfield: bitfield_msg.payload,
+    });
 }
 
 fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
@@ -399,81 +201,24 @@ fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
     return bitfield[byte_index as usize] >> (7 - offset) & 1 != 0;
 }
 
-fn read_message(mut stream: &TcpStream) -> anyhow::Result<Message> {
-    let mut message_length_buf = [0u8; 4];
-    stream.read(&mut message_length_buf)?;
-    let mut crsr = Cursor::new(message_length_buf);
-    let message_length = crsr.read_u32::<BigEndian>().unwrap() as usize;
-    if message_length == 0 {
-        return Ok(Message {
-            id: MessageId::KeepAlive,
-            payload: vec![],
-        });
-    }
-    let mut message_buf = vec![0u8; message_length];
-    stream.read(&mut message_buf)?;
-    let message_id = message_buf[0];
-    let payload = message_buf[1..].to_vec();
-    return Ok(Message {
-        id: MessageId::try_from(message_id)?,
-        payload,
-    });
-}
+fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_hashes: &Vec<&[u8]>) -> anyhow::Result<()> {
+    // Connect and handshake with peer
+    let mut conn = connect_to_peer(peer, info_hash, peer_id)?;
+    println!("Successfully completed handshake with {:?}", peer.to_string());
 
-struct Connection {
-    choked: bool,
-    bitfield: Vec<u8>,
-    peer_id: String,
-    stream: TcpStream,
-}
+    // Send Interested
+    let mut wtr = Cursor::new(vec![0u8; 5]);
+    wtr.write_u32::<BigEndian>(4)?;
+    wtr.write_u8(2);
+    conn.stream.write(wtr.get_ref())?;
 
-struct Message {
-    id: MessageId,
-    payload: Vec<u8>,
-}
-
-struct PieceState {}
-
-fn download_piece(piece_request: &PieceRequest, conn: &mut Connection) -> anyhow::Result<()> {
-    let mut num_bytes_requested = 0usize;
-    let mut num_bytes_downloaded = 0usize;
-    let mut num_pipelined_requests = 0u8;
-    conn.stream.set_read_timeout(Some(Duration::from_secs(30)));
-    conn.stream.set_write_timeout(Some(Duration::from_secs(30)));
-    while num_bytes_downloaded < piece_request.length {
-        println!("Peer: {:?} - choked: {:?} - piece index: {:?} - num bytes: {:?} / {:?}", conn.peer_id, conn.choked, piece_request.index, num_bytes_downloaded, piece_request.length);
-        let mut block_size = MAX_BLOCK_SIZE;
-        if piece_request.length - num_bytes_requested < block_size as usize {
-            block_size = (piece_request.length - num_bytes_requested) as u32
-        }
-        if !conn.choked {
-            while num_pipelined_requests < MAX_PIPELINED_REQUESTS && num_bytes_requested < piece_request.length {
-                // Send request for block
-                let mut crsr = Cursor::new(vec![]);
-                crsr.write_u32::<BigEndian>(1 + 4 * 3)?;
-                crsr.write_u8(MessageId::Request.into())?;
-                crsr.write_u32::<BigEndian>(piece_request.index as u32)?;
-                crsr.write_u32::<BigEndian>(num_bytes_requested as u32)?;
-                crsr.write_u32::<BigEndian>(block_size)?;
-                let request_message = crsr.get_mut();
-                conn.stream.write(request_message)?;
-
-                // Dynamic variables
-                num_bytes_requested += block_size as usize;
-                num_pipelined_requests += 1;
-            }
-        }
-        let msg = read_message(&conn.stream)?;
-        match msg.id {
-            MessageId::UnChoke => { conn.choked = false; }
-            MessageId::Choke => { conn.choked = true; }
-            MessageId::Piece => {
-                num_bytes_downloaded += (msg.payload[8..]).len();
-                num_pipelined_requests -= 1;
-            }
-            _ => {}
+    for (index, &piece_hash) in piece_hashes.iter().enumerate() {
+        let has_piece = bitfield_contains_index(&conn.bitfield, index as isize);
+        if !has_piece {
+            continue;
         }
     }
-    println!("Finished downloading piece {:?} from peer {:?}", piece_request.index, conn.peer_id);
+
+
     Ok(())
 }
