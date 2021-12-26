@@ -1,11 +1,14 @@
-use std::borrow::Borrow;
+use std::borrow::{Borrow, BorrowMut};
 use std::{cmp, fs};
 use std::cmp::Ordering;
+use std::i8::MAX;
 use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use anyhow::ensure;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use crossbeam_channel::{bounded, Sender};
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
 use serde_derive::{Serialize, Deserialize};
@@ -49,6 +52,11 @@ fn peer_to_socket_addr(chunk: &[u8]) -> anyhow::Result<SocketAddr> {
     Ok(SocketAddr::new(IpAddr::V4(ip_addr), port_fixed))
 }
 
+struct PieceRequest {
+    hash: Vec<u8>,
+    index: usize,
+    length: usize,
+}
 
 fn main() -> anyhow::Result<()> {
     // Parse torrent
@@ -89,9 +97,17 @@ fn main() -> anyhow::Result<()> {
     // Piece hashes
     let pieces = torrent.info.pieces.as_ref();
     let piece_hashes: Vec<&[u8]> = pieces.chunks(20).collect();
+    let mut piece_requests = Vec::<PieceRequest>::new();
+    for (index, &piece_hash) in piece_hashes.iter().enumerate() {
+        piece_requests.push(PieceRequest {
+            index,
+            hash: piece_hash.to_vec(),
+            length: torrent.info.piece_length as usize,
+        })
+    }
 
     for &peer in &peers {
-        let _ = start_worker(peer, info_hash, peer_id, &piece_hashes);
+        let _ = start_worker(peer, info_hash, peer_id, &piece_requests);
     }
 
     Ok(())
@@ -123,15 +139,15 @@ fn receive_handshake(mut stream: &TcpStream, info_hash: [u8; 20]) -> anyhow::Res
     let protocol = "BitTorrent protocol";
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     let mut pstrlen_buf = [0u8; 1];
-    stream.read(&mut pstrlen_buf)?;
+    stream.read_exact(&mut pstrlen_buf)?;
     let pstrlen: usize = pstrlen_buf[0].into();
     ensure!(pstrlen != 0, "Pstrlen cannot be zero");
     let mut pstr_buf = vec![0u8; pstrlen];
-    stream.read(&mut pstr_buf)?;
+    stream.read_exact(&mut pstr_buf)?;
     let pstr = String::from_utf8(pstr_buf)?;
     ensure!(pstr == protocol, "Peer does not use BitTorrent protocol");
     let mut handshake_buf = [0u8; 48];
-    stream.read(&mut handshake_buf)?;
+    stream.read_exact(&mut handshake_buf)?;
     let peer_info_hash = &handshake_buf[8..8 + 20];
     let peer_id = &handshake_buf[8 + 20..];
     ensure!(compare_hashes(&info_hash, peer_info_hash).is_eq(), "Info hashes do not match");
@@ -146,19 +162,20 @@ struct Message {
 
 fn read_message(mut stream: &TcpStream) -> anyhow::Result<Message> {
     let mut message_length_buf = [0u8; 4];
-    stream.read(&mut message_length_buf)?;
+    stream.read_exact(&mut message_length_buf)?;
     let mut rdr = Cursor::new(message_length_buf);
     let message_length = rdr.read_u32::<BigEndian>().unwrap() as usize;
     if message_length == 0 {
-        return Ok(Message { id: 0, payload: vec![] });
+        return Ok(Message { id: 255, payload: vec![] });
     }
     let mut message_buf = vec![0u8; message_length];
-    stream.read(&mut message_buf)?;
+    stream.read_exact(&mut message_buf)?;
     let id = message_buf[0];
     let payload = &message_buf[1..];
     Ok(Message { id, payload: payload.to_vec() })
 }
 
+// TODO: Impl debug
 struct Connection {
     stream: TcpStream,
     peer_id: String,
@@ -201,7 +218,53 @@ fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
     return bitfield[byte_index as usize] >> (7 - offset) & 1 != 0;
 }
 
-fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_hashes: &Vec<&[u8]>) -> anyhow::Result<()> {
+const MSG_CHOKE: u8 = 0;
+const MSG_UNCHOKE: u8 = 1;
+const MSG_INTERESTED: u8 = 2;
+const MSG_NOT_INTERESTED: u8 = 3;
+const MSG_HAVE: u8 = 4;
+const MSG_BITFIELD: u8 = 5;
+const MSG_REQUEST: u8 = 6;
+const MSG_PIECE: u8 = 7;
+const MSG_CANCEL: u8 = 8;
+const MSG_KEEP_ALIVE: u8 = 255;
+
+const MAX_BLOCK_SIZE: usize = 16384;
+const MAX_PIPELINED_REQUESTS: i8 = 5;
+
+fn send_request_message(mut conn: &mut Connection, index: u32, num_bytes_requested: u32, block_size: u32) -> anyhow::Result<()> {
+    let mut crsr = Cursor::new(vec![]);
+    crsr.write_u32::<BigEndian>(1 + 4 + 4 + 4)?;
+    crsr.write_u8(MSG_REQUEST)?;
+    crsr.write_u32::<BigEndian>(index)?;
+    crsr.write_u32::<BigEndian>(num_bytes_requested)?;
+    crsr.write_u32::<BigEndian>(block_size)?;
+    let request_message = crsr.get_mut();
+    conn.stream.write(request_message)?;
+    Ok(())
+}
+
+struct PieceMeta {
+    length: usize,
+    downloaded: usize,
+    requested: usize,
+    pipelined_requests: i8,
+    index: usize,
+}
+
+// Return on Unchoked
+fn download_piece(conn: &mut Connection) -> anyhow::Result<()> {
+    let msg = read_message(&conn.stream)?;
+    let (deadline_sender, deadline_receiver): (Sender<bool>, Receiver<bool>) = bounded(1)?;
+    loop {
+        match msg.id {
+            MSG_UNCHOKE => return Ok(()),
+            _ => {}
+        }
+    }
+}
+
+fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_requests: &Vec<PieceRequest>) -> anyhow::Result<()> {
     // Connect and handshake with peer
     let mut conn = connect_to_peer(peer, info_hash, peer_id)?;
     println!("Successfully completed handshake with {:?}", peer.to_string());
@@ -212,12 +275,18 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
     wtr.write_u8(2);
     conn.stream.write(wtr.get_ref())?;
 
-    for (index, &piece_hash) in piece_hashes.iter().enumerate() {
-        let has_piece = bitfield_contains_index(&conn.bitfield, index as isize);
-        if !has_piece {
-            continue;
-        }
+    // for piece_request in piece_requests {
+    //     let has_piece = bitfield_contains_index(&conn.bitfield, piece_request.index as isize);
+    //     if !has_piece {
+    //         continue;
+    //     }
+
+    // TODO: Return on unchoked
+    match download_piece(conn.borrow_mut()) {
+        Err(e) => println!("{:?}: {:?}", conn.peer_id, e),
+        Ok(_) => println!("Successfully unchoked {:?}", conn.peer_id)
     }
+    // }
 
 
     Ok(())
