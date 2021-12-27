@@ -208,6 +208,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Debug, Clone)]
 struct PieceRequest {
     piece_hash: Vec<u8>,
     index: usize,
