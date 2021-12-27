@@ -76,10 +76,10 @@ impl Clone for PieceRequest {
     }
 }
 
-const HANDSHAKE_TIMEOUT: u64 = 3;
 
 struct DownloadedPiece {
     buf: Vec<u8>,
+    index: usize,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -133,12 +133,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Initialize threads
-    let mut handles: Vec<JoinHandle<()>> = Vec::new();
     for &peer in &peers {
         let piece_request_receiver_copy = piece_request_receiver.clone();
         let piece_request_sender_copy = piece_request_sender.clone();
         let piece_collection_sender_copy = piece_collection_sender.clone();
-        let handle = thread::spawn(move || {
+        thread::spawn(move || {
             if let Err(e) = start_worker(
                 peer,
                 info_hash,
@@ -147,14 +146,16 @@ fn main() -> anyhow::Result<()> {
                 piece_request_sender_copy,
                 piece_collection_sender_copy,
             ) {
-                println!("Disconnected from worker {:?}: {:?}", peer.to_string(), e)
+                println!("Disconnected from worker {:?}: {:?}", peer.to_string(), e);
             }
         });
-        handles.push(handle);
     }
 
-    // Join handles
-    for handle in handles { let _ = handle.join(); }
+    let mut num_pieces_downloaded = 0usize;
+    for piece in piece_collection_receiver {
+        num_pieces_downloaded += 1;
+        println!("Downloaded {:?}/{:?} pieces", num_pieces_downloaded, piece_hashes.len());
+    }
 
     Ok(())
 }
@@ -180,6 +181,8 @@ fn compare_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
 
     a.len().cmp(&b.len())
 }
+
+const HANDSHAKE_TIMEOUT: u64 = 3;
 
 fn receive_handshake(mut stream: &TcpStream, info_hash: [u8; 20]) -> anyhow::Result<String> {
     let protocol = "BitTorrent protocol";
@@ -221,7 +224,6 @@ fn read_message(mut stream: &TcpStream) -> anyhow::Result<Message> {
     Ok(Message { id, payload: payload.to_vec() })
 }
 
-// TODO: Impl debug
 struct Connection {
     stream: TcpStream,
     peer_id: String,
@@ -237,7 +239,7 @@ impl Debug for Connection {
 }
 
 fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> anyhow::Result<Connection> {
-    let mut stream = TcpStream::connect_timeout(&peer, Duration::from_secs(3))?;
+    let mut stream = TcpStream::connect_timeout(&peer, Duration::from_secs(HANDSHAKE_TIMEOUT))?;
 
     // Create handshake
     let protocol = "BitTorrent protocol";
@@ -271,6 +273,7 @@ fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
     return bitfield[byte_index as usize] >> (7 - offset) & 1 != 0;
 }
 
+// TODO: type alias
 const MSG_CHOKE: u8 = 0;
 const MSG_UNCHOKE: u8 = 1;
 const MSG_INTERESTED: u8 = 2;
@@ -304,11 +307,9 @@ struct PieceMeta {
     index: usize,
 }
 
-const DOWNLOAD_TIMEOUT: u64 = 3;
 const MAX_PIPELINED_REQUESTS: u8 = 5;
 
-
-fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow::Result<()> {
+fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow::Result<DownloadedPiece> {
     let (deadline_sender, deadline_receiver): (Sender<bool>, Receiver<bool>) = bounded(1);
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(30));
@@ -340,7 +341,14 @@ fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow:
             }
             MSG_UNCHOKE => conn.choked = false,
             MSG_PIECE => {
-                let block = &msg.payload[8..];
+                ensure!(msg.payload.len() >= 8, "Payload must be at least 8 bytes.");
+                let mut rdr = Cursor::new(msg.payload);
+                let piece_index = rdr.read_u32::<BigEndian>()? as usize;
+                ensure!(piece_index == piece_request.index, "Mismatched piece indexes.");
+                let start = rdr.read_u32::<BigEndian>()? as usize;
+                ensure!(start < piece_buf.len(), "Start of piece is out of bounds of write buffer");
+                let block = &rdr.get_ref()[8..];
+                piece_buf.splice(start..start, block.iter().cloned());
                 num_bytes_downloaded += block.len();
                 num_pipelined_requests -= 1;
             }
@@ -348,8 +356,12 @@ fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow:
             _ => {}
         }
     }
-    println!("Downloaded {:?}% of piece {:?} from peer {:?}", 100f64, piece_request.index, conn);
-    Ok(())
+    // println!("Downloaded {:?}% of piece {:?} from peer {:?}", 100f64, piece_request.index, conn);
+    let downloaded_piece = DownloadedPiece {
+        buf: piece_buf,
+        index: piece_request.index,
+    };
+    Ok(downloaded_piece)
 }
 
 fn send_interested(mut conn: &mut Connection) -> anyhow::Result<()> {
@@ -367,6 +379,9 @@ fn send_unchoke(mut conn: &mut Connection) -> anyhow::Result<()> {
     conn.stream.write(wtr.get_ref())?;
     Ok(())
 }
+
+const DOWNLOAD_TIMEOUT: u64 = 5;
+
 
 fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_request_receiver: Receiver<PieceRequest>, piece_request_sender: Sender<PieceRequest>, piece_collection_sender: Sender<DownloadedPiece>) -> anyhow::Result<()> {
     // Connect and handshake with peer
@@ -398,8 +413,8 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
                 piece_request_sender.send(piece_request.clone());
                 bail!("Failed to download piece from {:?}: {:?}", conn.peer_id, e);
             }
-            Ok(_) => {
-                println!("Successfully downloaded piece {:?} from {:?}", piece_request.index, conn.peer_id);
+            Ok(piece) => {
+                piece_collection_sender.send(piece);
             }
         }
     }
