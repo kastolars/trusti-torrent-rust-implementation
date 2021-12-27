@@ -283,7 +283,6 @@ const MSG_CANCEL: u8 = 8;
 const MSG_KEEP_ALIVE: u8 = 255;
 
 const MAX_BLOCK_SIZE: usize = 16384;
-const MAX_PIPELINED_REQUESTS: i8 = 5;
 
 fn send_request_message(conn: &mut Connection, index: u32, num_bytes_requested: u32, block_size: u32) -> anyhow::Result<()> {
     let mut crsr = Cursor::new(vec![]);
@@ -306,6 +305,8 @@ struct PieceMeta {
 }
 
 const DOWNLOAD_TIMEOUT: u64 = 3;
+const MAX_PIPELINED_REQUESTS: u8 = 5;
+
 
 fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow::Result<()> {
     let (deadline_sender, deadline_receiver): (Sender<bool>, Receiver<bool>) = bounded(1);
@@ -315,18 +316,22 @@ fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow:
     });
     let mut num_bytes_requested = 0u32;
     let mut num_bytes_downloaded = 0usize;
+    let mut num_pipelined_requests = 0u8;
     let mut piece_buf = vec![0u8; piece_request.length];
     while num_bytes_downloaded < piece_request.length {
         if deadline_receiver.is_full() {
             bail!("Deadline reached.")
         }
         if !conn.choked {
-            let mut block_size = MAX_BLOCK_SIZE as u32;
-            if piece_request.length - (num_bytes_requested as usize) < block_size as usize {
-                block_size = (piece_request.length - num_bytes_requested as usize) as u32;
+            while num_pipelined_requests < MAX_PIPELINED_REQUESTS && num_bytes_requested < piece_request.length as u32 {
+                let mut block_size = MAX_BLOCK_SIZE as u32;
+                if piece_request.length - (num_bytes_requested as usize) < block_size as usize {
+                    block_size = (piece_request.length - num_bytes_requested as usize) as u32;
+                }
+                send_request_message(conn, piece_request.index as u32, num_bytes_requested, block_size)?;
+                num_bytes_requested += block_size;
+                num_pipelined_requests += 1;
             }
-            send_request_message(conn, piece_request.index as u32, num_bytes_requested, block_size)?;
-            num_bytes_requested += block_size;
         }
         let msg = read_message(&conn.stream)?;
         match msg.id {
@@ -337,7 +342,7 @@ fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow:
             MSG_PIECE => {
                 let block = &msg.payload[8..];
                 num_bytes_downloaded += block.len();
-                println!("Downloaded {:?}% of piece {:?} from peer {:?}", (num_bytes_downloaded as f64 / piece_request.length as f64) * 100f64, piece_request.index, conn);
+                num_pipelined_requests -= 1;
             }
             MSG_HAVE => {}
             _ => {}
