@@ -2,7 +2,8 @@ use std::borrow::{Borrow, BorrowMut};
 use std::{cmp, fs, thread};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Formatter};
-use std::io::{Cursor, Read, Write};
+use std::fs::File;
+use std::io::{Cursor, Read, Seek, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -14,7 +15,8 @@ use serde_bytes::ByteBuf;
 use serde_derive::{Serialize, Deserialize};
 use sha1::Sha1;
 use urlencoding::encode_binary;
-
+use std::io::SeekFrom;
+use std::ptr::hash;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Info {
@@ -92,9 +94,6 @@ fn calculate_piece_size(index: usize, piece_length: usize, length: usize) -> usi
 }
 
 fn main() -> anyhow::Result<()> {
-    // File hash
-    let file_hash = "45c9feabba213bdc6d72e7469de71ea5aeff73faea6bfb109ab5bad37c3b43bd";
-
     // Parse torrent
     let path = "debian-11.2.0-amd64-netinst.iso.torrent";
     let contents = fs::read(path).expect("Something went wrong reading the file");
@@ -165,27 +164,29 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut num_pieces_downloaded = 0usize;
-    let mut file = vec![0u8; torrent.info.length as usize];
+    let mut file = File::create("debian-11.2.0-amd64-netinst.iso")?;
     while num_pieces_downloaded < piece_hashes.len() {
         let piece = piece_collection_receiver.recv()?;
         num_pieces_downloaded += 1;
         let percent_progress = (num_pieces_downloaded as f32 / piece_hashes.len() as f32) * 100f32;
         let (start, end) = calculate_bounds_for_piece(piece.index, piece.buf.len(), torrent.info.length as usize);
-        file.splice(start..end, piece.buf);
+        file.seek(SeekFrom::Start(start as u64))?;
+        file.write(piece.buf.as_ref());
         println!("Downloaded {:.2}%", percent_progress);
     }
 
-    println!("Completed download. Verifying hash...");
+    println!("Completed download.");
+
     Ok(())
 }
 
 fn calculate_bounds_for_piece(index: usize, piece_length: usize, file_length: usize) -> (usize, usize) {
-    let begin = index * piece_length;
-    let mut end = begin + piece_length;
+    let start = index * piece_length;
+    let mut end = start + piece_length;
     if end > file_length {
         end = file_length;
     }
-    return (begin, end);
+    return (start, end);
 }
 
 
