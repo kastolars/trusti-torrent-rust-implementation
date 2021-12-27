@@ -154,7 +154,8 @@ fn main() -> anyhow::Result<()> {
     let mut num_pieces_downloaded = 0usize;
     for piece in piece_collection_receiver {
         num_pieces_downloaded += 1;
-        println!("Downloaded {:?}/{:?} pieces", num_pieces_downloaded, piece_hashes.len());
+        let percent_progress = (num_pieces_downloaded as f32 / piece_hashes.len() as f32) * 100f32;
+        println!("Downloaded {:.2}%", percent_progress);
     }
 
     Ok(())
@@ -348,7 +349,7 @@ fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow:
                 let start = rdr.read_u32::<BigEndian>()? as usize;
                 ensure!(start < piece_buf.len(), "Start of piece is out of bounds of write buffer");
                 let block = &rdr.get_ref()[8..];
-                piece_buf.splice(start..start, block.iter().cloned());
+                piece_buf.splice(start..(start+block.len()), block.iter().cloned());
                 num_bytes_downloaded += block.len();
                 num_pipelined_requests -= 1;
             }
@@ -356,7 +357,6 @@ fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow:
             _ => {}
         }
     }
-    // println!("Downloaded {:?}% of piece {:?} from peer {:?}", 100f64, piece_request.index, conn);
     let downloaded_piece = DownloadedPiece {
         buf: piece_buf,
         index: piece_request.index,
@@ -414,6 +414,14 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
                 bail!("Failed to download piece from {:?}: {:?}", conn.peer_id, e);
             }
             Ok(piece) => {
+                // Check integrity - put it back on the work queue if it's incorrect
+                let mut hasher = Sha1::new();
+                hasher.update(piece.buf.as_ref());
+                let result = hasher.digest().bytes();
+                if !compare_hashes(piece_request.hash.as_ref(), result.as_slice()).is_eq() {
+                    piece_request_sender.send(piece_request.clone())?;
+                    continue;
+                }
                 piece_collection_sender.send(piece);
             }
         }
