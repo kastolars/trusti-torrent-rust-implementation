@@ -79,7 +79,7 @@ impl Clone for PieceRequest {
 const HANDSHAKE_TIMEOUT: u64 = 3;
 
 struct DownloadedPiece {
-    buf: Vec<u8>
+    buf: Vec<u8>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -145,7 +145,7 @@ fn main() -> anyhow::Result<()> {
                 peer_id,
                 piece_request_receiver_copy,
                 piece_request_sender_copy,
-                piece_collection_sender_copy
+                piece_collection_sender_copy,
             ) {
                 println!("Disconnected from worker {:?}: {:?}", peer.to_string(), e)
             }
@@ -395,7 +395,7 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
             }
             Ok(_) => {
                 println!("Successfully downloaded piece {:?} from {:?}", piece_request.index, conn.peer_id);
-s            }
+            }
         }
     }
 
