@@ -366,7 +366,7 @@ fn send_unchoke(mut conn: &mut Connection) -> anyhow::Result<()> {
 fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_request_receiver: Receiver<PieceRequest>, piece_request_sender: Sender<PieceRequest>, piece_collection_sender: Sender<DownloadedPiece>) -> anyhow::Result<()> {
     // Connect and handshake with peer
     let mut conn = connect_to_peer(peer, info_hash, peer_id)?;
-    println!("Successfully completed handshake with {:?}", peer.to_string());//
+    println!("Successfully completed handshake with {:?}", peer.to_string());
 
     // Send Interested
     send_interested(conn.borrow_mut())?;
