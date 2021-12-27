@@ -82,9 +82,21 @@ struct DownloadedPiece {
     index: usize,
 }
 
+fn calculate_piece_size(index: usize, piece_length: usize, length: usize) -> usize {
+    let begin = index * piece_length;
+    let mut end = begin + piece_length;
+    if end > length {
+        end = length
+    }
+    return end - begin;
+}
+
 fn main() -> anyhow::Result<()> {
+    // File hash
+    let file_hash = "45c9feabba213bdc6d72e7469de71ea5aeff73faea6bfb109ab5bad37c3b43bd";
+
     // Parse torrent
-    let path = "C:\\Users\\kasto\\IdeaProjects\\trusti\\src\\debian-11.2.0-amd64-netinst.iso.torrent";
+    let path = "debian-11.2.0-amd64-netinst.iso.torrent";
     let contents = fs::read(path).expect("Something went wrong reading the file");
     let torrent = de::from_bytes::<Torrent>(&contents)?;
 
@@ -124,10 +136,11 @@ fn main() -> anyhow::Result<()> {
     let (piece_request_sender, piece_request_receiver): (Sender<PieceRequest>, Receiver<PieceRequest>) = crossbeam_channel::bounded(piece_hashes.len());
     let (piece_collection_sender, piece_collection_receiver): (Sender<DownloadedPiece>, Receiver<DownloadedPiece>) = crossbeam_channel::unbounded();
     for (index, &piece_hash) in piece_hashes.iter().enumerate() {
+        let length = calculate_piece_size(index, torrent.info.piece_length as usize, torrent.info.length as usize);
         let piece_request = PieceRequest {
             index,
             hash: piece_hash.to_vec(),
-            length: torrent.info.piece_length as usize,
+            length,
         };
         piece_request_sender.send(piece_request)?;
     }
@@ -152,14 +165,29 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut num_pieces_downloaded = 0usize;
-    for piece in piece_collection_receiver {
+    let mut file = vec![0u8; torrent.info.length as usize];
+    while num_pieces_downloaded < piece_hashes.len() {
+        let piece = piece_collection_receiver.recv()?;
         num_pieces_downloaded += 1;
         let percent_progress = (num_pieces_downloaded as f32 / piece_hashes.len() as f32) * 100f32;
+        let (start, end) = calculate_bounds_for_piece(piece.index, piece.buf.len(), torrent.info.length as usize);
+        file.splice(start..end, piece.buf);
         println!("Downloaded {:.2}%", percent_progress);
     }
 
+    println!("Completed download. Verifying hash...");
     Ok(())
 }
+
+fn calculate_bounds_for_piece(index: usize, piece_length: usize, file_length: usize) -> (usize, usize) {
+    let begin = index * piece_length;
+    let mut end = begin + piece_length;
+    if end > file_length {
+        end = file_length;
+    }
+    return (begin, end);
+}
+
 
 fn create_handshake(pstr: &str, info_hash: [u8; 20], peer_id: [u8; 20]) -> Vec<u8> {
     let mut handshake: Vec<u8> = Vec::new();
@@ -183,7 +211,7 @@ fn compare_hashes(a: &[u8], b: &[u8]) -> cmp::Ordering {
     a.len().cmp(&b.len())
 }
 
-const HANDSHAKE_TIMEOUT: u64 = 3;
+const HANDSHAKE_TIMEOUT: u64 = 5;
 
 fn receive_handshake(mut stream: &TcpStream, info_hash: [u8; 20]) -> anyhow::Result<String> {
     let protocol = "BitTorrent protocol";
@@ -309,11 +337,12 @@ struct PieceMeta {
 }
 
 const MAX_PIPELINED_REQUESTS: u8 = 5;
+const DOWNLOAD_DEADLINE: u64 = 30;
 
 fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow::Result<DownloadedPiece> {
     let (deadline_sender, deadline_receiver): (Sender<bool>, Receiver<bool>) = bounded(1);
     thread::spawn(move || {
-        thread::sleep(Duration::from_secs(30));
+        thread::sleep(Duration::from_secs(DOWNLOAD_DEADLINE));
         deadline_sender.send(true);
     });
     let mut num_bytes_requested = 0u32;
@@ -349,11 +378,11 @@ fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow:
                 let start = rdr.read_u32::<BigEndian>()? as usize;
                 ensure!(start < piece_buf.len(), "Start of piece is out of bounds of write buffer");
                 let block = &rdr.get_ref()[8..];
-                piece_buf.splice(start..(start+block.len()), block.iter().cloned());
+                piece_buf.splice(start..(start + block.len()), block.iter().cloned());
                 num_bytes_downloaded += block.len();
                 num_pipelined_requests -= 1;
             }
-            MSG_HAVE => {}
+            MSG_HAVE => { println!("Received HAVE message from {:?}", conn) }
             _ => {}
         }
     }
@@ -388,11 +417,11 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
     let mut conn = connect_to_peer(peer, info_hash, peer_id)?;
     println!("Successfully completed handshake with {:?}", peer.to_string());
 
-    // Send Interested
-    send_interested(conn.borrow_mut())?;
-
     // Send Unchoke
     send_unchoke(conn.borrow_mut());
+
+    // Send Interested
+    send_interested(conn.borrow_mut())?;
 
     // Read from receiver and download each piece
     for piece_request in piece_request_receiver {
