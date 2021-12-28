@@ -6,13 +6,15 @@ use std::time::Duration;
 use anyhow::{bail, ensure};
 use byteorder::{BigEndian, ReadBytesExt};
 use crossbeam_channel::{bounded, Receiver, Sender};
-use crate::{DownloadedPiece, Handshake, HANDSHAKE_TIMEOUT, PieceRequest, receive_handshake, send_request_message};
-use crate::message::{read_message, MSG_BITFIELD, MSG_UNCHOKE, MSG_CHOKE, MSG_PIECE, MSG_NOT_INTERESTED, MSG_HAVE, MSG_CANCEL};
+use crate::{build_message, build_request_message, DownloadedPiece, Handshake, MessageId, PieceRequest, receive_handshake};
+use crate::message::{MSG_BITFIELD, MSG_CANCEL, MSG_CHOKE, MSG_HAVE, MSG_NOT_INTERESTED, MSG_PIECE, MSG_UNCHOKE, read_message};
 
 
 const DOWNLOAD_DEADLINE: u64 = 30;
 const MAX_PIPELINED_REQUESTS: u8 = 5;
 const MAX_BLOCK_SIZE: usize = 16384;
+const HANDSHAKE_TIMEOUT: u64 = 5;
+
 
 pub struct Connection {
     pub stream: TcpStream,
@@ -30,6 +32,18 @@ impl Debug for Connection {
 
 
 impl Connection {
+    fn send_request_message(&mut self, index: u32, num_bytes_requested: u32, block_size: u32) -> anyhow::Result<()> {
+        let request_message = build_request_message(index, num_bytes_requested, block_size)?;
+        self.stream.write(request_message.as_ref())?;
+        Ok(())
+    }
+
+    pub fn send_message(&mut self, id: MessageId) -> anyhow::Result<()> {
+        let message = build_message(id)?;
+        self.stream.write(message.as_ref())?;
+        Ok(())
+    }
+
     pub fn download_piece(&mut self, piece_request: PieceRequest) -> anyhow::Result<DownloadedPiece> {
         let (deadline_sender, deadline_receiver): (Sender<bool>, Receiver<bool>) = bounded(1);
         thread::spawn(move || {
@@ -50,7 +64,7 @@ impl Connection {
                     if piece_request.size - (num_bytes_requested as usize) < block_size as usize {
                         block_size = (piece_request.size - num_bytes_requested as usize) as u32;
                     }
-                    send_request_message(self, piece_request.index as u32, num_bytes_requested, block_size)?;
+                    self.send_request_message(piece_request.index as u32, num_bytes_requested, block_size)?;
                     num_bytes_requested += block_size;
                     num_pipelined_requests += 1;
                 }
@@ -88,6 +102,11 @@ impl Connection {
 pub fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> anyhow::Result<Connection> {
     let mut stream = TcpStream::connect_timeout(&peer, Duration::from_secs(HANDSHAKE_TIMEOUT))?;
 
+    // Set timeouts
+    stream.set_write_timeout(Some(Duration::from_secs(HANDSHAKE_TIMEOUT)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(HANDSHAKE_TIMEOUT)))?;
+
+
     // Create handshake
     let handshake = Handshake {
         pstr: "BitTorrent protocol".to_string(),
@@ -97,7 +116,6 @@ pub fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20])
     let handshake = handshake.serialize();
 
     // Send handshake
-    stream.set_write_timeout(Some(Duration::from_secs(HANDSHAKE_TIMEOUT)))?;
     stream.write(&handshake)?;
 
     // Receive handshake

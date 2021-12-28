@@ -1,7 +1,7 @@
-use std::borrow::{Borrow, BorrowMut};
+use std::borrow::{Borrow};
 use std::{fs, thread};
 use std::cmp::Ordering;
-use std::fmt::{Debug};
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
@@ -11,13 +11,13 @@ use byteorder::{BigEndian, ReadBytesExt};
 use crossbeam_channel::{Receiver, Sender};
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
-use serde_derive::{Serialize, Deserialize};
+use serde_derive::{Deserialize, Serialize};
 use sha1::Sha1;
 use urlencoding::encode_binary;
 use std::io::SeekFrom;
-use crate::connection::{connect_to_peer, Connection};
+use crate::connection::{connect_to_peer};
 use crate::handshake::Handshake;
-use crate::message::{MSG_UNCHOKE, build_request_message, MessageId, build_message, MSG_INTERESTED};
+use crate::message::{build_message, build_request_message, MessageId, MSG_INTERESTED, MSG_UNCHOKE};
 use crate::piece_request::PieceRequest;
 
 mod piece_request;
@@ -174,11 +174,8 @@ fn compare_byte_slices(a: &[u8], b: &[u8]) -> bool {
     a.len().cmp(&b.len()).is_eq()
 }
 
-const HANDSHAKE_TIMEOUT: u64 = 5;
-
 fn receive_handshake(mut stream: &TcpStream, info_hash: [u8; 20]) -> anyhow::Result<String> {
     let protocol = "BitTorrent protocol";
-    stream.set_read_timeout(Some(Duration::from_secs(HANDSHAKE_TIMEOUT)))?;
     let mut pstrlen_buf = [0u8; 1];
     stream.read_exact(&mut pstrlen_buf)?;
     let pstrlen: usize = pstrlen_buf[0].into();
@@ -206,18 +203,6 @@ fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
     return bitfield[byte_index as usize] >> (7 - offset) & 1 != 0;
 }
 
-fn send_request_message(conn: &mut Connection, index: u32, num_bytes_requested: u32, block_size: u32) -> anyhow::Result<()> {
-    let request_message = build_request_message(index, num_bytes_requested, block_size)?;
-    conn.stream.write(request_message.as_ref())?;
-    Ok(())
-}
-
-
-fn send_message(conn: &mut Connection, id: MessageId) -> anyhow::Result<()> {
-    let message = build_message(id)?;
-    conn.stream.write(message.as_ref())?;
-    Ok(())
-}
 
 const DOWNLOAD_TIMEOUT: u64 = 5;
 
@@ -228,10 +213,10 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
     println!("Successfully completed handshake with {:?}", peer.to_string());
 
     // Send Unchoke
-    send_message(conn.borrow_mut(), MSG_UNCHOKE)?;
+    conn.send_message(MSG_UNCHOKE)?;
 
     // Send Interested
-    send_message(conn.borrow_mut(), MSG_INTERESTED)?;
+    conn.send_message(MSG_INTERESTED)?;
 
     // Read from receiver and download each piece
     for piece_request in piece_request_receiver {
