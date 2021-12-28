@@ -15,10 +15,15 @@ use serde_derive::{Serialize, Deserialize};
 use sha1::Sha1;
 use urlencoding::encode_binary;
 use std::io::SeekFrom;
+use crate::handshake::Handshake;
+use crate::message::read_message;
+use crate::piece_request::PieceRequest;
+
 
 mod piece_request;
+mod handshake;
+mod message;
 
-use crate::piece_request::PieceRequest;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Info {
@@ -158,25 +163,6 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-struct Handshake {
-    pstr: String,
-    info_hash: [u8; 20],
-    peer_id: [u8; 20],
-}
-
-impl Handshake {
-    fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        let pstrlen = self.pstr.len();
-        buf.push(pstrlen as u8);
-        buf.extend(self.pstr.bytes());
-        buf.extend([0u8; 8]);
-        buf.extend(self.info_hash);
-        buf.extend(self.peer_id);
-        buf
-    }
-}
-
 fn compare_byte_slices(a: &[u8], b: &[u8]) -> bool {
     for (ai, bi) in a.iter().zip(b.iter()) {
         match ai.cmp(&bi) {
@@ -210,25 +196,7 @@ fn receive_handshake(mut stream: &TcpStream, info_hash: [u8; 20]) -> anyhow::Res
     Ok(peer_string_id)
 }
 
-struct Message {
-    id: u8,
-    payload: Vec<u8>,
-}
 
-fn read_message(mut stream: &TcpStream) -> anyhow::Result<Message> {
-    let mut message_length_buf = [0u8; 4];
-    stream.read_exact(&mut message_length_buf)?;
-    let mut rdr = Cursor::new(message_length_buf);
-    let message_length = rdr.read_u32::<BigEndian>().unwrap() as usize;
-    if message_length == 0 {
-        return Ok(Message { id: 255, payload: vec![] });
-    }
-    let mut message_buf = vec![0u8; message_length];
-    stream.read_exact(&mut message_buf)?;
-    let id = message_buf[0];
-    let payload = &message_buf[1..];
-    Ok(Message { id, payload: payload.to_vec() })
-}
 
 struct Connection {
     stream: TcpStream,
