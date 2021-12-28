@@ -1,4 +1,4 @@
-use std::borrow::{Borrow};
+use std::borrow::Borrow;
 use std::{fs, thread};
 use std::cmp::Ordering;
 use std::fmt::Debug;
@@ -11,28 +11,21 @@ use byteorder::{BigEndian, ReadBytesExt};
 use crossbeam_channel::{Receiver, Sender};
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
-use serde_derive::{Deserialize, Serialize};
+use serde_derive::{Deserialize};
 use sha1::Sha1;
 use urlencoding::encode_binary;
 use std::io::SeekFrom;
-use crate::connection::{connect_to_peer};
+use crate::connection::connect_to_peer;
 use crate::handshake::Handshake;
 use crate::message::{build_message, build_request_message, MessageId, MSG_INTERESTED, MSG_UNCHOKE};
+use crate::metainfo::Info;
 use crate::piece_request::PieceRequest;
 
 mod piece_request;
 mod handshake;
 mod message;
 mod connection;
-
-#[derive(Serialize, Deserialize, Debug)]
-struct Info {
-    name: String,
-    #[serde(rename = "piece length")]
-    piece_length: u64,
-    pieces: ByteBuf,
-    length: u64,
-}
+mod metainfo;
 
 #[derive(Deserialize, Debug)]
 struct Torrent {
@@ -83,10 +76,7 @@ fn main() -> anyhow::Result<()> {
     let torrent = de::from_bytes::<Torrent>(&contents)?;
 
     // Info hash
-    let serialized_info = serde_bencode::to_bytes(&torrent.info)?;
-    let mut hasher = Sha1::new();
-    hasher.update(serialized_info.borrow());
-    let info_hash = hasher.digest().bytes();
+    let info_hash = torrent.info.hash()?;
 
     // Peer id
     let random_bytes: Vec<u8> = (0..20).map(|_| { rand::random::<u8>() }).collect();
