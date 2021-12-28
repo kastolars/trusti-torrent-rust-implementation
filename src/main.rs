@@ -1,13 +1,13 @@
 use std::borrow::{Borrow, BorrowMut};
 use std::{fs, thread};
 use std::cmp::Ordering;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
 use std::time::Duration;
 use anyhow::{bail, ensure};
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ReadBytesExt};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
@@ -15,15 +15,15 @@ use serde_derive::{Serialize, Deserialize};
 use sha1::Sha1;
 use urlencoding::encode_binary;
 use std::io::SeekFrom;
+use crate::connection::Connection;
 use crate::handshake::Handshake;
-use crate::message::read_message;
+use crate::message::{MSG_BITFIELD, read_message, MSG_UNCHOKE, MSG_CHOKE, MSG_PIECE, MSG_NOT_INTERESTED, MSG_HAVE, MSG_CANCEL, build_request_message, MessageId, build_message, MSG_INTERESTED};
 use crate::piece_request::PieceRequest;
-
 
 mod piece_request;
 mod handshake;
 mod message;
-
+mod connection;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Info {
@@ -197,21 +197,6 @@ fn receive_handshake(mut stream: &TcpStream, info_hash: [u8; 20]) -> anyhow::Res
 }
 
 
-
-struct Connection {
-    stream: TcpStream,
-    peer_id: String,
-    bitfield: Vec<u8>,
-    choked: bool,
-}
-
-impl Debug for Connection {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let addr = self.stream.peer_addr().unwrap();
-        write!(f, "{:?}-{:?}", self.peer_id, addr)
-    }
-}
-
 fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> anyhow::Result<Connection> {
     let mut stream = TcpStream::connect_timeout(&peer, Duration::from_secs(HANDSHAKE_TIMEOUT))?;
 
@@ -251,29 +236,11 @@ fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
     return bitfield[byte_index as usize] >> (7 - offset) & 1 != 0;
 }
 
-type MessageId = u8;
-
-const MSG_CHOKE: MessageId = 0;
-const MSG_UNCHOKE: MessageId = 1;
-const MSG_INTERESTED: MessageId = 2;
-const MSG_NOT_INTERESTED: MessageId = 3;
-const MSG_HAVE: MessageId = 4;
-const MSG_BITFIELD: MessageId = 5;
-const MSG_REQUEST: MessageId = 6;
-const MSG_PIECE: MessageId = 7;
-const MSG_CANCEL: MessageId = 8;
-
 const MAX_BLOCK_SIZE: usize = 16384;
 
 fn send_request_message(conn: &mut Connection, index: u32, num_bytes_requested: u32, block_size: u32) -> anyhow::Result<()> {
-    let mut crsr = Cursor::new(vec![]);
-    crsr.write_u32::<BigEndian>(1 + 4 + 4 + 4)?;
-    crsr.write_u8(MSG_REQUEST)?;
-    crsr.write_u32::<BigEndian>(index)?;
-    crsr.write_u32::<BigEndian>(num_bytes_requested)?;
-    crsr.write_u32::<BigEndian>(block_size)?;
-    let request_message = crsr.get_mut();
-    conn.stream.write(request_message)?;
+    let request_message = build_request_message(index, num_bytes_requested, block_size)?;
+    conn.stream.write(request_message.as_ref())?;
     Ok(())
 }
 
@@ -334,19 +301,9 @@ fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow:
     Ok(downloaded_piece)
 }
 
-fn send_interested(conn: &mut Connection) -> anyhow::Result<()> {
-    let mut wtr = Cursor::new(vec![0u8; 5]);
-    wtr.write_u32::<BigEndian>(1)?;
-    wtr.write_u8(MSG_INTERESTED)?;
-    conn.stream.write(wtr.get_ref())?;
-    Ok(())
-}
-
-fn send_unchoke(conn: &mut Connection) -> anyhow::Result<()> {
-    let mut wtr = Cursor::new(vec![0u8; 5]);
-    wtr.write_u32::<BigEndian>(1)?;
-    wtr.write_u8(MSG_UNCHOKE)?;
-    conn.stream.write(wtr.get_ref())?;
+fn send_message(conn: &mut Connection, id: MessageId) -> anyhow::Result<()> {
+    let message = build_message(id)?;
+    conn.stream.write(message.as_ref())?;
     Ok(())
 }
 
@@ -359,10 +316,10 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
     println!("Successfully completed handshake with {:?}", peer.to_string());
 
     // Send Unchoke
-    send_unchoke(conn.borrow_mut())?;
+    send_message(conn.borrow_mut(), MSG_UNCHOKE)?;
 
     // Send Interested
-    send_interested(conn.borrow_mut())?;
+    send_message(conn.borrow_mut(), MSG_INTERESTED)?;
 
     // Read from receiver and download each piece
     for piece_request in piece_request_receiver {
