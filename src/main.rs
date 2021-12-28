@@ -1,7 +1,6 @@
 use std::borrow::Borrow;
 use std::{fs, thread};
 use std::cmp::Ordering;
-use std::fmt::Debug;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
@@ -10,33 +9,23 @@ use anyhow::{bail, ensure};
 use byteorder::{BigEndian, ReadBytesExt};
 use crossbeam_channel::{Receiver, Sender};
 use serde_bencode::de;
-use serde_bytes::ByteBuf;
-use serde_derive::{Deserialize};
 use sha1::Sha1;
-use urlencoding::encode_binary;
 use std::io::SeekFrom;
+use tracker::Tracker;
 use crate::connection::connect_to_peer;
 use crate::handshake::Handshake;
 use crate::message::{build_message, build_request_message, MessageId, MSG_INTERESTED, MSG_UNCHOKE};
 use crate::metainfo::Info;
 use crate::piece_request::PieceRequest;
+use crate::torrent::Torrent;
 
 mod piece_request;
 mod handshake;
 mod message;
 mod connection;
 mod metainfo;
-
-#[derive(Deserialize, Debug)]
-struct Torrent {
-    info: Info,
-    announce: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct Tracker {
-    peers: ByteBuf,
-}
+mod tracker;
+mod torrent;
 
 fn bytes_to_socket_addr(chunk: &[u8]) -> anyhow::Result<SocketAddr> {
     // Split chunk into ip octet and big endian port
@@ -69,6 +58,7 @@ fn calculate_piece_size(index: usize, piece_length: usize, length: usize) -> usi
     return end - begin;
 }
 
+
 fn main() -> anyhow::Result<()> {
     // Parse torrent
     let path = "debian-11.2.0-amd64-netinst.iso.torrent";
@@ -83,11 +73,7 @@ fn main() -> anyhow::Result<()> {
     let peer_id: [u8; 20] = <[u8; 20]>::try_from(random_bytes.borrow())?;
 
     // Tracker url
-    let announce = torrent.announce.as_str();
-    let ih = encode_binary(&info_hash);
-    let pid = encode_binary(&peer_id);
-    let left = torrent.info.length.to_string();
-    let tracker_url = format!("{}?compact=1&downloaded=0&port=6881&uploaded=0&info_hash={}&peer_id={}&left={}", announce, ih.as_ref(), pid.as_ref(), left.as_str());
+    let tracker_url = torrent.build_tracker_url(info_hash, peer_id);
 
     // Tracker
     let resp = reqwest::blocking::get(tracker_url).unwrap().bytes()?;
