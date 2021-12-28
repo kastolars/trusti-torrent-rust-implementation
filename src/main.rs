@@ -8,16 +8,16 @@ use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
 use std::time::Duration;
 use anyhow::{bail, ensure};
 use byteorder::{BigEndian, ReadBytesExt};
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
 use serde_derive::{Serialize, Deserialize};
 use sha1::Sha1;
 use urlencoding::encode_binary;
 use std::io::SeekFrom;
-use crate::connection::Connection;
+use crate::connection::{connect_to_peer, Connection};
 use crate::handshake::Handshake;
-use crate::message::{MSG_BITFIELD, read_message, MSG_UNCHOKE, MSG_CHOKE, MSG_PIECE, MSG_NOT_INTERESTED, MSG_HAVE, MSG_CANCEL, build_request_message, MessageId, build_message, MSG_INTERESTED};
+use crate::message::{MSG_UNCHOKE, build_request_message, MessageId, build_message, MSG_INTERESTED};
 use crate::piece_request::PieceRequest;
 
 mod piece_request;
@@ -62,7 +62,7 @@ fn bytes_to_socket_addr(chunk: &[u8]) -> anyhow::Result<SocketAddr> {
 }
 
 
-struct DownloadedPiece {
+pub struct DownloadedPiece {
     buf: Vec<u8>,
     index: usize,
 }
@@ -197,36 +197,6 @@ fn receive_handshake(mut stream: &TcpStream, info_hash: [u8; 20]) -> anyhow::Res
 }
 
 
-fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]) -> anyhow::Result<Connection> {
-    let mut stream = TcpStream::connect_timeout(&peer, Duration::from_secs(HANDSHAKE_TIMEOUT))?;
-
-    // Create handshake
-    let handshake = Handshake {
-        pstr: "BitTorrent protocol".to_string(),
-        info_hash,
-        peer_id,
-    };
-    let handshake = handshake.serialize();
-
-    // Send handshake
-    stream.set_write_timeout(Some(Duration::from_secs(HANDSHAKE_TIMEOUT)))?;
-    stream.write(&handshake)?;
-
-    // Receive handshake
-    let remote_peer_id_string = receive_handshake(&stream, info_hash)?;
-
-    // Receive bitfield
-    let bitfield_msg = read_message(&stream)?;
-    ensure!(bitfield_msg.id == MSG_BITFIELD, "Was expecting a bitfield");
-
-    return Ok(Connection {
-        choked: true,
-        stream,
-        peer_id: remote_peer_id_string,
-        bitfield: bitfield_msg.payload,
-    });
-}
-
 fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
     let byte_index = index / 8;
     let offset = index % 8;
@@ -236,70 +206,12 @@ fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
     return bitfield[byte_index as usize] >> (7 - offset) & 1 != 0;
 }
 
-const MAX_BLOCK_SIZE: usize = 16384;
-
 fn send_request_message(conn: &mut Connection, index: u32, num_bytes_requested: u32, block_size: u32) -> anyhow::Result<()> {
     let request_message = build_request_message(index, num_bytes_requested, block_size)?;
     conn.stream.write(request_message.as_ref())?;
     Ok(())
 }
 
-const MAX_PIPELINED_REQUESTS: u8 = 5;
-const DOWNLOAD_DEADLINE: u64 = 30;
-
-fn download_piece(conn: &mut Connection, piece_request: PieceRequest) -> anyhow::Result<DownloadedPiece> {
-    let (deadline_sender, deadline_receiver): (Sender<bool>, Receiver<bool>) = bounded(1);
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(DOWNLOAD_DEADLINE));
-        let _ = deadline_sender.send(true);
-    });
-    let mut num_bytes_requested = 0u32;
-    let mut num_bytes_downloaded = 0usize;
-    let mut num_pipelined_requests = 0u8;
-    let mut piece_buf = vec![0u8; piece_request.size];
-    while num_bytes_downloaded < piece_request.size {
-        if deadline_receiver.is_full() {
-            bail!("Deadline reached.")
-        }
-        if !conn.choked {
-            while num_pipelined_requests < MAX_PIPELINED_REQUESTS && num_bytes_requested < piece_request.size as u32 {
-                let mut block_size = MAX_BLOCK_SIZE as u32;
-                if piece_request.size - (num_bytes_requested as usize) < block_size as usize {
-                    block_size = (piece_request.size - num_bytes_requested as usize) as u32;
-                }
-                send_request_message(conn, piece_request.index as u32, num_bytes_requested, block_size)?;
-                num_bytes_requested += block_size;
-                num_pipelined_requests += 1;
-            }
-        }
-        let msg = read_message(&conn.stream)?;
-        match msg.id {
-            MSG_CHOKE => conn.choked = true,
-            MSG_UNCHOKE => conn.choked = false,
-            MSG_PIECE => {
-                ensure!(msg.payload.len() >= 8, "Payload must be at least 8 bytes.");
-                let mut rdr = Cursor::new(msg.payload);
-                let piece_index = rdr.read_u32::<BigEndian>()? as usize;
-                ensure!(piece_index == piece_request.index, "Mismatched piece indexes.");
-                let start = rdr.read_u32::<BigEndian>()? as usize;
-                ensure!(start < piece_buf.len(), "Start of piece is out of bounds of write buffer");
-                let block = &rdr.get_ref()[8..];
-                piece_buf.splice(start..(start + block.len()), block.iter().cloned());
-                num_bytes_downloaded += block.len();
-                num_pipelined_requests -= 1;
-            }
-            MSG_NOT_INTERESTED => {}
-            MSG_HAVE => {}
-            MSG_CANCEL => {}
-            _ => {}
-        }
-    }
-    let downloaded_piece = DownloadedPiece {
-        buf: piece_buf,
-        index: piece_request.index,
-    };
-    Ok(downloaded_piece)
-}
 
 fn send_message(conn: &mut Connection, id: MessageId) -> anyhow::Result<()> {
     let message = build_message(id)?;
@@ -334,7 +246,7 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
         // Attempt to download the piece
         conn.stream.set_read_timeout(Some(Duration::from_secs(DOWNLOAD_TIMEOUT)))?;
         conn.stream.set_write_timeout(Some(Duration::from_secs(DOWNLOAD_TIMEOUT)))?;
-        match download_piece(conn.borrow_mut(), piece_request.clone()) {
+        match conn.download_piece(piece_request.clone()) {
             Err(e) => {
                 conn.stream.shutdown(Shutdown::Both)?;
                 piece_request_sender.send(piece_request.clone())?;
