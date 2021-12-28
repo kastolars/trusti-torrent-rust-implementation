@@ -2,11 +2,10 @@ use std::borrow::Borrow;
 use std::{fs, thread};
 use std::cmp::Ordering;
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, Write};
-use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::io::{Read, Seek, Write};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::time::Duration;
 use anyhow::{bail, ensure};
-use byteorder::{BigEndian, ReadBytesExt};
 use crossbeam_channel::{Receiver, Sender};
 use serde_bencode::de;
 use sha1::Sha1;
@@ -26,23 +25,6 @@ mod connection;
 mod metainfo;
 mod tracker;
 mod torrent;
-
-fn bytes_to_socket_addr(chunk: &[u8]) -> anyhow::Result<SocketAddr> {
-    // Split chunk into ip octet and big endian port
-    let (ip_octets, port) = chunk.split_at(4);
-
-    // Get the ip address
-    let ip_slice_to_array: [u8; 4] = ip_octets.try_into()?;
-    let ip_addr = Ipv4Addr::from(ip_slice_to_array);
-
-    // Get the port
-    let mut rdr = Cursor::new(port);
-    let port_fixed = rdr.read_u16::<BigEndian>()?;
-
-    // Create socket address
-    Ok(SocketAddr::new(IpAddr::V4(ip_addr), port_fixed))
-}
-
 
 pub struct DownloadedPiece {
     buf: Vec<u8>,
@@ -80,19 +62,17 @@ fn main() -> anyhow::Result<()> {
     let tracker = de::from_bytes::<Tracker>(&resp)?;
 
     // Get peers
-    let tracker_vec: Vec<u8> = tracker.peers.into_vec();
-    let chunks: Vec<&[u8]> = tracker_vec.chunks(6).collect();
-    let mut peers = Vec::<SocketAddr>::new();
-    for chunk in chunks {
-        let sock = bytes_to_socket_addr(chunk)?;
-        peers.push(sock);
-    }
+    let peers = tracker.get_peers()?;
 
     // Piece hashes
     let pieces = torrent.info.pieces.as_ref();
     let piece_hashes: Vec<&[u8]> = pieces.as_ref().chunks(20).collect();
+
+    // Channel initialization
     let (piece_request_sender, piece_request_receiver): (Sender<PieceRequest>, Receiver<PieceRequest>) = crossbeam_channel::bounded(piece_hashes.len());
     let (piece_collection_sender, piece_collection_receiver): (Sender<DownloadedPiece>, Receiver<DownloadedPiece>) = crossbeam_channel::unbounded();
+
+    // Fill up request channel
     for (index, &piece_hash) in piece_hashes.iter().enumerate() {
         let size = calculate_piece_size(index, torrent.info.piece_length as usize, torrent.info.length as usize);
         let piece_request = PieceRequest {
