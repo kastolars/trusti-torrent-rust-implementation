@@ -2,10 +2,10 @@ use std::borrow::Borrow;
 use std::{fs, thread};
 use std::cmp::Ordering;
 use std::fs::File;
-use std::io::{Read, Seek, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::io::{Seek, Write};
+use std::net::{Shutdown, SocketAddr};
 use std::time::Duration;
-use anyhow::{bail, ensure};
+use anyhow::{bail};
 use crossbeam_channel::{Receiver, Sender};
 use serde_bencode::de;
 use sha1::Sha1;
@@ -74,7 +74,7 @@ fn main() -> anyhow::Result<()> {
         piece_request_sender.send(piece_request)?;
     }
 
-    // Initialize threads
+    // Start threads
     for &peer in &peers {
         let piece_request_receiver_copy = piece_request_receiver.clone();
         let piece_request_sender_copy = piece_request_sender.clone();
@@ -93,6 +93,7 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Collect downloaded pieces
     let mut num_pieces_downloaded = 0usize;
     let mut file = File::create("debian-11.2.0-amd64-netinst.iso")?;
     while num_pieces_downloaded < piece_hashes.len() {
@@ -119,25 +120,6 @@ fn compare_byte_slices(a: &[u8], b: &[u8]) -> bool {
     }
 
     a.len().cmp(&b.len()).is_eq()
-}
-
-fn receive_handshake(mut stream: &TcpStream, info_hash: [u8; 20]) -> anyhow::Result<String> {
-    let protocol = "BitTorrent protocol";
-    let mut pstrlen_buf = [0u8; 1];
-    stream.read_exact(&mut pstrlen_buf)?;
-    let pstrlen: usize = pstrlen_buf[0].into();
-    ensure!(pstrlen != 0, "Pstrlen cannot be zero");
-    let mut pstr_buf = vec![0u8; pstrlen];
-    stream.read_exact(&mut pstr_buf)?;
-    let pstr = String::from_utf8(pstr_buf)?;
-    ensure!(pstr == protocol, "Peer does not use BitTorrent protocol");
-    let mut handshake_buf = [0u8; 48];
-    stream.read_exact(&mut handshake_buf)?;
-    let peer_info_hash = &handshake_buf[8..8 + 20];
-    let peer_id = &handshake_buf[8 + 20..];
-    ensure!(compare_byte_slices(&info_hash, peer_info_hash), "Info hashes do not match");
-    let peer_string_id = String::from_utf8(peer_id.to_vec())?;
-    Ok(peer_string_id)
 }
 
 

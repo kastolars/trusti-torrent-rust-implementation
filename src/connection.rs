@@ -6,7 +6,8 @@ use std::time::Duration;
 use anyhow::{bail, ensure};
 use byteorder::{BigEndian, ReadBytesExt};
 use crossbeam_channel::{bounded, Receiver, Sender};
-use crate::{build_message, build_request_message, DownloadedPiece, Handshake, MessageId, PieceRequest, receive_handshake};
+use crate::{build_message, build_request_message, DownloadedPiece, Handshake, MessageId, PieceRequest};
+use crate::handshake::compare_handshakes;
 use crate::message::{MSG_BITFIELD, MSG_CANCEL, MSG_CHOKE, MSG_HAVE, MSG_NOT_INTERESTED, MSG_PIECE, MSG_UNCHOKE, read_message};
 
 
@@ -108,18 +109,18 @@ pub fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20])
 
 
     // Create handshake
-    let handshake = Handshake {
+    let handshake_struct = Handshake {
         pstr: "BitTorrent protocol".to_string(),
         info_hash,
         peer_id,
     };
-    let handshake = handshake.serialize();
+    let handshake = handshake_struct.serialize();
 
     // Send handshake
     stream.write(&handshake)?;
 
     // Receive handshake
-    let remote_peer_id_string = receive_handshake(&stream, info_hash)?;
+    let remote_peer_id_string = compare_handshakes(&stream, handshake_struct)?;
 
     // Receive bitfield
     let bitfield_msg = read_message(&stream)?;
@@ -132,3 +133,5 @@ pub fn connect_to_peer(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20])
         bitfield: bitfield_msg.payload,
     });
 }
+
+
