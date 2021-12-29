@@ -21,4 +21,32 @@ impl Info {
         hasher.update(serialized_info.borrow());
         Ok(hasher.digest().bytes())
     }
+
+    pub fn calculate_piece_size(self, index: usize) -> usize {
+        let begin = index * self.piece_length as usize;
+        let mut end = begin + self.piece_length as usize;
+        if end > self.length as usize {
+            end = self.length as usize
+        }
+        return end - begin;
+    }
+}
+
+
+impl Clone for Info {
+    fn clone(&self) -> Self {
+        return Info {
+            name: self.name.clone(),
+            piece_length: self.piece_length,
+            pieces: self.pieces.clone(),
+            length: self.length,
+        };
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.name = source.name.clone();
+        self.pieces = source.pieces.clone();
+        self.piece_length = source.piece_length;
+        self.length = source.length;
+    }
 }

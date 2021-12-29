@@ -31,16 +31,6 @@ pub struct DownloadedPiece {
     index: usize,
 }
 
-fn calculate_piece_size(index: usize, piece_length: usize, length: usize) -> usize {
-    let begin = index * piece_length;
-    let mut end = begin + piece_length;
-    if end > length {
-        end = length
-    }
-    return end - begin;
-}
-
-
 fn main() -> anyhow::Result<()> {
     // Parse torrent
     let path = "debian-11.2.0-amd64-netinst.iso.torrent";
@@ -74,7 +64,8 @@ fn main() -> anyhow::Result<()> {
 
     // Fill up request channel
     for (index, &piece_hash) in piece_hashes.iter().enumerate() {
-        let size = calculate_piece_size(index, torrent.info.piece_length as usize, torrent.info.length as usize);
+        let metainfo = torrent.info.clone();
+        let size = metainfo.calculate_piece_size(index);
         let piece_request = PieceRequest {
             index,
             hash: piece_hash.to_vec(),
