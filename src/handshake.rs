@@ -40,3 +40,26 @@ pub fn compare_handshakes(mut stream: &TcpStream, hs: Handshake) -> anyhow::Resu
     let peer_string_id = String::from_utf8(peer_id.to_vec())?;
     Ok(peer_string_id)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use crate::Handshake;
+
+    #[test]
+    fn test_serialize() {
+        let hs = Handshake {
+            pstr: "BitTorrent protocol".to_string(),
+            info_hash: [2u8; 20],
+            peer_id: [3u8; 20],
+        };
+
+        let serialized = hs.serialize();
+        assert_eq!(serialized[0], 19);
+        let pstr = String::from_utf8(serialized[1..20].to_owned()).unwrap();
+        assert_eq!(pstr, "BitTorrent protocol");
+        assert_eq!(serialized[20..28], [0u8; 8]);
+        assert_eq!(serialized[28..48], [2u8; 20]);
+        assert_eq!(serialized[48..68], [3u8; 20]);
+    }
+}

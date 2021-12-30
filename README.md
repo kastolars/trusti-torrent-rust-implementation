@@ -12,7 +12,7 @@ This project was inspired by [Jesse Li's blog post](https://blog.jse.li/posts/to
 
 ### Parse torrent file
 
-These are structs I created to deserialize the torrent file. It's how .torrent files structure their bencoded data.
+These are structs I created to deserialize the torrent file. It's how .torrent files structure their [bencoded](https://en.wikipedia.org/wiki/Bencode) data.
 
 ```
 // torrent.rs
@@ -37,7 +37,7 @@ pub struct Info {
 }
 ```
 
-### Info hash and peer id
+### Info hash and peer ID
 
 Next we hash the metainfo portion of the torrent file to get the Sha-1 20 byte hash. We need this to perform our
 handshake with peers.
@@ -129,7 +129,7 @@ A serialized handshake is composed of the following:
 - Peer Id - The 20 byte peer id we generated earlier.
 
 We then receive a handshake from our peer. After that we can compare handshake fields. The protocol identifiers must be
-the same and we can confirm the peer has the file we need by comparing info hashes.
+the same, and we can confirm the peer has the file we need by comparing info hashes.
 
 ### Messages
 
@@ -341,3 +341,6 @@ Make sure you move it to the root of the project, level with the `src` directory
 ### Run
 
 `cargo run --package trusti --bin trusti`
+
+### Verification
+The above webpage also provides a Sha-256 hash where you can verify and compare the hash of the downloaded file.

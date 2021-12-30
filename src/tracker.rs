@@ -28,7 +28,6 @@ fn bytes_to_socket_addr(chunk: &[u8]) -> anyhow::Result<SocketAddr> {
 
 
 impl Tracker {
-
     pub fn get_peers(self) -> anyhow::Result<Vec<SocketAddr>> {
         let tracker_vec: Vec<u8> = self.peers.into_vec();
         let chunks: Vec<&[u8]> = tracker_vec.chunks(6).collect();
