@@ -1,9 +1,12 @@
 # TRustI - Torrent Rust Implementation
 
 ## Inspiration
-This project was inspired by [Jesse Li's blog post](https://blog.jse.li/posts/torrent/)  where he built a torrent client using Golang. 
+
+This project was inspired by [Jesse Li's blog post](https://blog.jse.li/posts/torrent/)  where he built a torrent client
+using Golang.
 
 ## Sources used
+
 - [Jesse Li's Blog Post](https://blog.jse.li/posts/torrent/)
 - [Bram Cohen's Protocol Specification from 2008](https://www.bittorrent.org/beps/bep_0003.html)
 - [Kristen Widman's Blog Post](http://www.kristenwidman.com/blog/71/how-to-write-a-bittorrent-client-part-2/)
@@ -12,7 +15,8 @@ This project was inspired by [Jesse Li's blog post](https://blog.jse.li/posts/to
 
 ### Parse torrent file
 
-These are structs I created to deserialize the torrent file. It's how .torrent files structure their [bencoded](https://en.wikipedia.org/wiki/Bencode) data.
+These are structs I created to deserialize the torrent file. It's how .torrent files structure
+their [bencoded](https://en.wikipedia.org/wiki/Bencode) data.
 
 ```
 // torrent.rs
@@ -67,8 +71,8 @@ let peer_id: [u8; 20] = <[u8; 20]>::try_from(random_bytes.borrow())?;
 
 ### Get peers
 
-To find out who is serving the file we are attempting to download, we need to make a GET request to the tracker url. We
-can build the tracker url using information provided in the torrent file.
+To find out who is serving the file we are attempting to download, we need to make a GET request to the tracker URL. We
+can build the tracker URL using information provided in the torrent file.
 
 ```
 // torrent.rs
@@ -76,17 +80,17 @@ can build the tracker url using information provided in the torrent file.
 impl Torrent {
     pub fn build_tracker_url(&self, info_hash: [u8; 20], peer_id: [u8; 20]) -> String {
         let announce = self.announce.as_str();
-        let ih = encode_binary(&info_hash);
-        let pid = encode_binary(&peer_id);
+        let info_hash = encode_binary(&info_hash);
+        let peer_id = encode_binary(&peer_id);
         let left = self.info.length.to_string();
-        format!("{}?compact=1&downloaded=0&port=6881&uploaded=0&info_hash={}&peer_id={}&left={}", announce, ih.as_ref(), pid.as_ref(), left.as_str())
+        format!("{}?compact=1&downloaded=0&port=6881&uploaded=0&info_hash={}&peer_id={}&left={}", announce, info_hash.as_ref(), peer_id.as_ref(), left.as_str())
     }
 }
 ```
 
-A successful call to the tracker server will return a list of peers that we can attempt connections with.
+A successful call to the tracker server will return a list of peers that we can attempt to make connections with.
 
-Here's an example:
+Here's an example tracker URL:
 
 ```
 http://bttracker.debian.org:6969/announce?compact=1&downloaded=0&port=6881&uploaded=0&info_hash=%28%C5Q%96%F5wS%C4%0A%CE%B6%FBXa~i%95%A7%ED%DB&peer_id=5%14%D7%BF%BFY%5B~V%10-%8CKCk%16%E5%92%87%AA&left=396361728
@@ -100,18 +104,18 @@ chunk and convert it to a `SocketAddr`:
 
 fn bytes_to_socket_addr(chunk: &[u8]) -> anyhow::Result<SocketAddr> {
     // Split chunk into ip octet and big endian port
-    let (ip_octets, port) = chunk.split_at(4);
+    let (ip, port) = chunk.split_at(4);
 
     // Get the ip address
-    let ip_slice_to_array: [u8; 4] = ip_octets.try_into()?;
-    let ip_addr = Ipv4Addr::from(ip_slice_to_array);
+    let ip: [u8; 4] = ip.try_into()?;
+    let ip = Ipv4Addr::from(ip);
 
     // Get the port
     let mut rdr = Cursor::new(port);
-    let port_fixed = rdr.read_u16::<BigEndian>()?;
+    let port = rdr.read_u16::<BigEndian>()?;
 
     // Create socket address
-    Ok(SocketAddr::new(IpAddr::V4(ip_addr), port_fixed))
+    Ok(SocketAddr::new(IpAddr::V4(ip), port))
 }
 ```
 
@@ -139,7 +143,7 @@ structured the same:
 - Length - The 4 byte big endian length of the message. The value is at least one, because not all messages have
   payloads but all have a message ID.
 - ID - The 1 byte message ID.
-- Payload - The (length - 1) byte size of the payload to follow.
+- Payload - The (length - 1) byte-sized data to follow.
 
 The message types are mapped to message ID's:
 
@@ -155,7 +159,7 @@ The message types are mapped to message ID's:
 
 A message with length 0 is interpreted as a "Keep-Alive" message intended to maintain the connection.
 
-Here is code to read messages from a tcp stream:
+Here is the code to read messages from a tcp stream:
 
 ```
 // message.rs
@@ -187,8 +191,8 @@ A bitfield is a clever way to communicate which pieces of a file a peer has.
 The bitfield message leverages big endian _bits_ to encode which pieces a peer has.
 
 When parsing the torrent file, we get an array of 20 byte piece hashes in the metainfo struct. The bitfield payload has
-a bit count equivalent to the number of hashes in this array. A 1 bit means that a peer has the piece indexed at that
-bit's value in the array.
+a bit for each of the hashes in this array. A 1 bit means that a peer has the piece indexed at that bit's position in
+the array.
 
 An example would be:
 
@@ -205,7 +209,7 @@ wasteful requests.
 ### Choke and Interested
 
 Peers maintain a state on either side of the connection. Connections begin in a choked and uninterested state. In order
-for data transfer to commence, both peers need to be unchoked and interested.
+for data transfer to commence, both peers need to be unchoked.
 
 We will send an unchoke message and an interested message to our peer first. Once we receive an unchoke message from the
 peer, we can start making requests for pieces!
@@ -224,12 +228,12 @@ corresponding piece hash we retrieved from the .torrent file.
 
 ### Blocks
 
-Pieces can be quite large, and their size is contained in the metainfo file. For this reason, we ask for "fragments"
-or "blocks" of pieces in our Request message.
+Pieces can be quite large, and their size is contained in the metainfo file. For this reason, we ask for fragments or "
+blocks" of pieces in our Request message.
 
 Traditionally we will limit the request block sizes to 16,384 bytes. We will make requests for blocks until we have
 downloaded the whole piece. It is recommended from the white paper to pipeline our requests to improve throughput. We
-will limit our number of active pipelined requests to 5 so as to not risk getting choked.
+will limit our number of active pipelined requests to 5 to not risk getting choked.
 
 ```
 // connection.rs
@@ -343,4 +347,5 @@ Make sure you move it to the root of the project, level with the `src` directory
 `cargo run --package trusti --bin trusti`
 
 ### Verification
+
 The above webpage also provides a Sha-256 hash where you can verify and compare the hash of the downloaded file.

@@ -12,18 +12,18 @@ pub struct Tracker {
 
 fn bytes_to_socket_addr(chunk: &[u8]) -> anyhow::Result<SocketAddr> {
     // Split chunk into ip octet and big endian port
-    let (ip_octets, port) = chunk.split_at(4);
+    let (ip, port) = chunk.split_at(4);
 
     // Get the ip address
-    let ip_slice_to_array: [u8; 4] = ip_octets.try_into()?;
-    let ip_addr = Ipv4Addr::from(ip_slice_to_array);
+    let ip: [u8; 4] = ip.try_into()?;
+    let ip = Ipv4Addr::from(ip);
 
     // Get the port
     let mut rdr = Cursor::new(port);
-    let port_fixed = rdr.read_u16::<BigEndian>()?;
+    let port = rdr.read_u16::<BigEndian>()?;
 
     // Create socket address
-    Ok(SocketAddr::new(IpAddr::V4(ip_addr), port_fixed))
+    Ok(SocketAddr::new(IpAddr::V4(ip), port))
 }
 
 
