@@ -6,7 +6,8 @@ use std::time::Duration;
 use anyhow::{bail, ensure};
 use byteorder::{BigEndian, ReadBytesExt};
 use crossbeam_channel::{bounded, Receiver, Sender};
-use crate::{build_message, build_request_message, DownloadedPiece, Handshake, MessageId, PieceRequest};
+use crate::{build_message, build_request_message, Handshake, MessageId, PieceRequest};
+use crate::downloaded_piece::DownloadedPiece;
 use crate::handshake::compare_handshakes;
 use crate::message::{MSG_BITFIELD, MSG_CANCEL, MSG_CHOKE, MSG_HAVE, MSG_NOT_INTERESTED, MSG_PIECE, MSG_UNCHOKE, read_message};
 

@@ -5,13 +5,14 @@ use std::fs::File;
 use std::io::{Seek, Write};
 use std::net::{Shutdown, SocketAddr};
 use std::time::Duration;
-use anyhow::{bail};
+use anyhow::bail;
 use crossbeam_channel::{Receiver, Sender};
 use serde_bencode::de;
 use sha1::Sha1;
 use std::io::SeekFrom;
 use tracker::Tracker;
 use crate::connection::connect_to_peer;
+use crate::downloaded_piece::DownloadedPiece;
 use crate::handshake::Handshake;
 use crate::message::{build_message, build_request_message, MessageId, MSG_INTERESTED, MSG_UNCHOKE};
 use crate::metainfo::Info;
@@ -25,11 +26,8 @@ mod connection;
 mod metainfo;
 mod tracker;
 mod torrent;
-
-pub struct DownloadedPiece {
-    buf: Vec<u8>,
-    index: usize,
-}
+mod downloaded_piece;
+mod bitfield;
 
 fn main() -> anyhow::Result<()> {
     // Parse torrent
@@ -100,7 +98,7 @@ fn main() -> anyhow::Result<()> {
         let piece = piece_collection_receiver.recv()?;
         num_pieces_downloaded += 1;
         let percent_progress = (num_pieces_downloaded as f32 / piece_hashes.len() as f32) * 100f32;
-        let start = piece.index * piece.buf.len();
+        let start = piece.get_start();
         file.seek(SeekFrom::Start(start as u64))?;
         file.write(piece.buf.as_ref())?;
         println!("Downloaded {:.2}%", percent_progress);
@@ -123,16 +121,6 @@ fn compare_byte_slices(a: &[u8], b: &[u8]) -> bool {
 }
 
 
-fn bitfield_contains_index(bitfield: &Vec<u8>, index: isize) -> bool {
-    let byte_index = index / 8;
-    let offset = index % 8;
-    if byte_index < 0 || byte_index >= bitfield.len() as isize {
-        return false;
-    }
-    return bitfield[byte_index as usize] >> (7 - offset) & 1 != 0;
-}
-
-
 const DOWNLOAD_TIMEOUT: u64 = 5;
 
 
@@ -151,7 +139,7 @@ fn start_worker(peer: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_
     for piece_request in piece_request_receiver {
 
         // Check if peer has the piece
-        let has_piece = bitfield_contains_index(&conn.bitfield, piece_request.index as isize);
+        let has_piece = bitfield::bitfield_contains_index(&conn.bitfield, piece_request.index as isize);
         if !has_piece {
             piece_request_sender.send(piece_request)?;
             continue;
