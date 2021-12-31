@@ -1,5 +1,14 @@
 # TRustI - Torrent Rust Implementation
 
+If you wish to skip the walkthrough and just run the code, the instructions are at the bottom.
+
+## Introduciton
+
+This is my Rust implementation of a BitTorrent client. I chose this project because the goal of creating a BitTorrent
+client forces me to learn socket programming, parsing, and concurrency concepts in Rust.
+
+Note: I do not condone piracy or any type of illegal file sharing. I've purposefully hardcoded the file in this project.
+
 ## Inspiration
 
 This project was inspired by [Jesse Li's blog post](https://blog.jse.li/posts/torrent/)  where he built a torrent client
@@ -333,8 +342,13 @@ And we're done!
 
 ### Torrent file
 
-I have hardcoded the `.torrent` file for this project. You can download it
+I have hardcoded the `.torrent` file for this project. You can download it by clicking
 here: https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/debian-11.2.0-amd64-netinst.iso.torrent
+
+Or alternatively download it
+from [this page at the bottom](https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/#indexlist).
+
+The file you're looking for is called `debian-11.2.0-amd64-netinst.iso.torrent`.
 
 Make sure you move it to the root of the project, level with the `src` directory.
 
