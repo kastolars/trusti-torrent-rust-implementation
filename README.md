@@ -2,7 +2,7 @@
 
 If you wish to skip the walkthrough and just run the code, the instructions are at the bottom.
 
-## Introduciton
+## Introduction
 
 This is my Rust implementation of a BitTorrent client. I chose this project because the goal of creating a BitTorrent
 client forces me to learn socket programming, parsing, and concurrency concepts in Rust.
